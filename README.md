@@ -10,37 +10,34 @@ are trying to hide behind them.
 No accounts, no internet, no port forwarding. One person hosts, everyone else
 picks the game off a list.
 
+Runs on Linux, macOS and Windows, and they can all play in the same match.
+
 ## Setup (once per machine)
 
 ```bash
-git clone <this repo>
+git clone https://github.com/enescs/sacmagame.git
 cd sacmagame
-./setup.sh
+./setup.sh          # Windows: setup.bat
 ```
 
 That builds a local `.venv/` and installs pygame into it. Nothing is installed
-system-wide.
-
-On Windows, without the shell scripts:
-
-```
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-```
+system-wide. You need Python 3.10 or newer.
 
 ## Playing
 
 One person hosts:
 
-```bash
-./host.sh --name "Office FFA"
-```
+| | |
+|---|---|
+| Linux / macOS | `./host.sh --name "Office FFA"` |
+| Windows | `host.bat --name "Office FFA"` |
 
 Everyone else, on the same wifi:
 
-```bash
-./play.sh
-```
+| | |
+|---|---|
+| Linux / macOS | `./play.sh` |
+| Windows | `play.bat` |
 
 The client scans the network, lists whatever games it finds, and you hit Enter.
 Nobody needs to know an IP address. If discovery is blocked on your network,
@@ -50,10 +47,11 @@ press `M` in the menu and type the host's address, or skip the menu entirely:
 ./play.sh --host 10.0.0.5 --name enes
 ```
 
-The host can play too — just run `./play.sh` alongside `./host.sh`.
+The host can play too — just run the client alongside the server.
 
-Windows equivalents: `.venv\Scripts\python -m sacma.server` and
-`.venv\Scripts\python -m sacma.client`.
+The `.sh` and `.bat` files are one-line wrappers, so you can always call Python
+directly instead: `.venv/bin/python -m sacma.server` on Linux and macOS,
+`.venv\Scripts\python -m sacma.client` on Windows.
 
 ## Controls
 
@@ -63,7 +61,13 @@ Windows equivalents: `.venv\Scripts\python -m sacma.server` and
 | mouse | aim |
 | left click / `Space` | shoot (hold to keep firing) |
 | `R` | reload |
+| `T` / `Enter` | chat — type, `Enter` to send, `Esc` to cancel |
+| `F1` / `F2` | debug: jump to the previous/next map (or `PgUp`/`PgDn`) |
 | `Esc` | back to the menu |
+
+Map jumping restarts the round, so host with `--no-debug` once people are
+actually competing. Durations and fire rates are all constants at the top of
+[shared.py](sacma/shared.py) if something feels off.
 
 Six rounds in the magazine, 1.5s reload, and it auto-reloads when you run dry —
 firing wildly is how you get caught reloading.
@@ -87,7 +91,7 @@ grabbing one usually means giving up your cover. Touch it to pick it up.
 
 | | |
 |---|---|
-| **Shield** | absorbs exactly one bullet, then pops |
+| **Shield** | absorbs exactly one bullet, then pops — expires after 7s |
 | **Inf ammo** | no reloading for 10s |
 | **Rapid fire** | ~2.6x fire rate for 10s |
 | **Hot rounds** | 1.7x bullet speed for 12s |
@@ -113,8 +117,12 @@ sliding blocks and rotors — if you want to add one.
 ## If nobody can connect
 
 - **Firewall.** The most common cause by far. On Linux:
-  `sudo ufw allow 50500/tcp && sudo ufw allow 50505/udp`. Windows will pop a
-  dialog the first time you host — allow it on private networks.
+  `sudo ufw allow 50500/tcp && sudo ufw allow 50505/udp`. Windows pops a dialog
+  the first time you host — tick **Private networks** and allow it. If you
+  dismissed it, the rule is under Windows Defender Firewall → Allow an app.
+- **Two clients on one Windows box** may not both see the server list, because
+  sharing the discovery port relies on `SO_REUSEPORT`, which Windows lacks.
+  Start the second one with `play.bat --host 127.0.0.1` instead.
 - **Guest wifi.** A lot of corporate and guest networks isolate clients from
   each other, so no amount of configuration will let two laptops talk. You need
   a normal network, or a phone hotspot.

@@ -17,6 +17,11 @@ MAX_PLAYERS = 8
 
 TICK_RATE = 60  # server simulation steps per second (also the snapshot rate)
 
+CHAT_MAX_LEN = 90      # characters kept from a client's message
+CHAT_MIN_GAP = 0.5     # seconds a client must wait between messages
+CHAT_SHOW_TIME = 9.0   # seconds a message stays on screen
+CHAT_MAX_LINES = 6     # most recent messages shown at once
+
 # --- arena -------------------------------------------------------------------
 
 ARENA_W, ARENA_H = 1280, 720
@@ -82,7 +87,9 @@ POWERUPS = [P_SHIELD, P_AMMO, P_RAPID, P_VELOCITY, P_SWIFT, P_SCATTER]
 POWERUP_BIT = {name: 1 << i for i, name in enumerate(POWERUPS)}
 
 POWERUP_DURATION = {
-    P_SHIELD: 16.0,    # or until it eats a bullet, whichever comes first
+    # Short on purpose: a shield is a free life in a one-shot game, so it
+    # should force you to go and use it rather than sit on it.
+    P_SHIELD: 7.0,     # or until it eats a bullet, whichever comes first
     P_AMMO: 10.0,
     P_RAPID: 10.0,
     P_VELOCITY: 12.0,

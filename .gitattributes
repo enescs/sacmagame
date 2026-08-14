@@ -1,0 +1,5 @@
+# Batch files need CRLF or Windows mis-parses labels and goto targets.
+*.bat text eol=crlf
+
+# Shell scripts must keep LF even if someone clones on Windows.
+*.sh  text eol=lf

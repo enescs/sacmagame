@@ -21,7 +21,8 @@ import pygame
 from .maps import MAPS, mover_rect, rotor_segment
 from .net import Discovery, NetClient
 from .shared import (
-    ARENA_H, ARENA_W, BG, BORDER, BOX_RADIUS, BULLET_RADIUS, DEFAULT_PORT, GRID,
+    ARENA_H, ARENA_W, BG, BORDER, BOX_RADIUS, BULLET_RADIUS, CHAT_MAX_LEN,
+    CHAT_MAX_LINES, CHAT_SHOW_TIME, DEFAULT_PORT, GRID,
     HAZARD_EDGE, HAZARD_FILL, HUD_BG, HUD_H, MAG_SIZE, PHASE_COUNTDOWN,
     PHASE_LIVE, PHASE_OVER, PHASE_WAITING, PLAYER_COLORS, PLAYER_RADIUS,
     POWERUPS, POWERUP_BIT, POWERUP_COLOR, POWERUP_LABEL, P_SHIELD, TEXT,
@@ -31,6 +32,11 @@ from .shared import (
 # Snapshot player-row indices, mirroring Game.snapshot().
 P_ID, P_X, P_Y, P_AIM, P_ALIVE, P_AMMO, P_RELOAD, P_BITS = 0, 1, 2, 3, 4, 5, 6, 7
 P_WINS, P_KILLS, P_DEATHS, P_WAIT = 8, 9, 10, 11
+
+# Debug map cycling. F1/F2 are the advertised pair; PageUp/PageDown are bound
+# too for anyone on a laptop that steals the function row for brightness.
+MAP_PREV_KEYS = (pygame.K_F1, pygame.K_PAGEUP)
+MAP_NEXT_KEYS = (pygame.K_F2, pygame.K_PAGEDOWN)
 
 
 class Effects:
@@ -120,13 +126,14 @@ class App:
         self.net = None
         self.fx = Effects()
         self.feed = []          # [(surface, expiry)]
+        self.chat = []          # [[name surface, text surface, expiry]]
         self.banner = ""
         self.round_result = ""
 
         self.discovery = Discovery()
         self.discovery.start()
         self.sel = 0
-        self.typing = None      # None | "name" | "host"
+        self.typing = None      # None | "name" | "host" | "chat"
         self.typed = ""
         self.status = ""
 
@@ -144,6 +151,7 @@ class App:
         self.net.start()
         self.screen_state = "play"
         self.feed.clear()
+        self.chat.clear()
         self.banner = ""
         self.round_result = ""
 
@@ -151,6 +159,8 @@ class App:
         if self.net:
             self.net.close()
             self.net = None
+        if self.typing == "chat":
+            self.typing = None
         self.screen_state = "menu"
 
     # -- main loop ------------------------------------------------------------
@@ -196,13 +206,14 @@ class App:
                 continue
 
             if self.typing:
+                limit = CHAT_MAX_LEN if self.typing == "chat" else 24
                 if ev.key == pygame.K_RETURN:
                     self.commit_typing()
                 elif ev.key == pygame.K_ESCAPE:
                     self.typing = None
                 elif ev.key == pygame.K_BACKSPACE:
                     self.typed = self.typed[:-1]
-                elif ev.unicode and ev.unicode.isprintable() and len(self.typed) < 24:
+                elif ev.unicode and ev.unicode.isprintable() and len(self.typed) < limit:
                     self.typed += ev.unicode
                 continue
 
@@ -212,6 +223,22 @@ class App:
                     self.disconnect()
                 else:
                     return False
+
+            elif (self.screen_state == "play" and self.net
+                    and ev.key in (pygame.K_t, pygame.K_RETURN)):
+                # Open the chat box. Movement keys stop being read while it is
+                # up, so typing "sw" does not walk you into a wall.
+                self.typing, self.typed = "chat", ""
+
+            elif (self.screen_state == "play" and self.net
+                    and ev.key in MAP_PREV_KEYS + MAP_NEXT_KEYS):
+                # Debug: flip through maps without playing rounds out. The
+                # server ignores this if it was started with --no-debug.
+                # Function and page keys sit in the same physical spot on every
+                # keyboard layout, unlike the bracket keys they replaced --
+                # those need AltGr on a Turkish keyboard.
+                self.net.send({"t": "map",
+                               "dir": 1 if ev.key in MAP_NEXT_KEYS else -1})
 
             elif self.screen_state == "menu":
                 servers = self.discovery.servers()
@@ -231,6 +258,10 @@ class App:
     def commit_typing(self):
         if self.typing == "name":
             self.name = self.typed.strip()[:14] or "player"
+        elif self.typing == "chat":
+            text = self.typed.strip()
+            if text and self.net:
+                self.net.send({"t": "chat", "text": text[:CHAT_MAX_LEN]})
         elif self.typing == "host":
             raw = self.typed.strip()
             if raw:
@@ -256,14 +287,19 @@ class App:
         if me:
             aim = math.atan2(my - me[P_Y], mx - me[P_X])
 
+        # While the chat box is open the keyboard belongs to it -- keep aiming
+        # (the mouse is still yours) but stop moving, shooting and reloading.
+        chatting = self.typing == "chat"
+
         net.send({
             "t": "input",
-            "up": keys[pygame.K_w] or keys[pygame.K_UP],
-            "down": keys[pygame.K_s] or keys[pygame.K_DOWN],
-            "left": keys[pygame.K_a] or keys[pygame.K_LEFT],
-            "right": keys[pygame.K_d] or keys[pygame.K_RIGHT],
-            "shoot": pygame.mouse.get_pressed()[0] or keys[pygame.K_SPACE],
-            "reload": keys[pygame.K_r],
+            "up": not chatting and (keys[pygame.K_w] or keys[pygame.K_UP]),
+            "down": not chatting and (keys[pygame.K_s] or keys[pygame.K_DOWN]),
+            "left": not chatting and (keys[pygame.K_a] or keys[pygame.K_LEFT]),
+            "right": not chatting and (keys[pygame.K_d] or keys[pygame.K_RIGHT]),
+            "shoot": (not chatting
+                      and (pygame.mouse.get_pressed()[0] or keys[pygame.K_SPACE])),
+            "reload": not chatting and keys[pygame.K_r],
             "aim": round(aim, 4),
         })
 
@@ -328,6 +364,9 @@ class App:
             elif kind == "draw":
                 self.round_result = "DRAW"
 
+            elif kind == "chat":
+                self.push_chat(ev["name"], ev["color"], ev["text"])
+
             elif kind == "join":
                 self.push_feed(f"{ev['name']} joined", TEXT_DIM)
 
@@ -340,6 +379,13 @@ class App:
         self.feed.append((self.f_small.render(text, True, color),
                           time.time() + 4.0))
         self.feed = self.feed[-6:]
+
+    def push_chat(self, name, color, text):
+        col = PLAYER_COLORS[color % len(PLAYER_COLORS)]
+        self.chat.append([self.f_small.render(f"{name}:", True, col),
+                          self.f_small.render(text, True, TEXT),
+                          time.time() + CHAT_SHOW_TIME])
+        self.chat = self.chat[-CHAT_MAX_LINES:]
 
     # -- helpers --------------------------------------------------------------
 
@@ -428,6 +474,7 @@ class App:
         self.fx.draw(arena)
         self.draw_feed(arena)
         self.draw_overlay(arena, snap)
+        self.draw_chat(arena)
         self.draw_hud(c, snap)
 
     def draw_arena(self, s, snap):
@@ -511,6 +558,44 @@ class App:
         for surf, _exp in self.feed:
             s.blit(surf, (ARENA_W - surf.get_width() - 26, y))
             y += 22
+
+    def draw_chat(self, s):
+        """Recent messages bottom-left, plus the input box while typing.
+
+        Everything here is drawn on translucent plates and expires on its own,
+        so a conversation never hides the corner of the arena you are fighting
+        in for long.
+        """
+        now = time.time()
+        self.chat = [c for c in self.chat if c[2] > now]
+
+        line_h = 21
+        box_h = 32
+        bottom = ARENA_H - 14 - (box_h + 6 if self.typing == "chat" else 0)
+
+        for i, (name_surf, text_surf, expiry) in enumerate(reversed(self.chat)):
+            # Hold full opacity, then fade over the last stretch of the life.
+            alpha = int(255 * min(1.0, (expiry - now) / 1.2))
+            y = bottom - line_h * (i + 1)
+            width = name_surf.get_width() + text_surf.get_width() + 20
+            plate = pygame.Surface((width, line_h), pygame.SRCALPHA)
+            plate.fill((10, 12, 18, alpha * 100 // 255))
+            s.blit(plate, (16, y))
+            name_surf.set_alpha(alpha)
+            text_surf.set_alpha(alpha)
+            s.blit(name_surf, (24, y + 3))
+            s.blit(text_surf, (24 + name_surf.get_width() + 8, y + 3))
+
+        if self.typing == "chat":
+            top = ARENA_H - 14 - box_h
+            box = pygame.Surface((ARENA_W - 32, box_h), pygame.SRCALPHA)
+            box.fill((10, 12, 18, 165))
+            s.blit(box, (16, top))
+            pygame.draw.rect(s, (70, 78, 104), (16, top, ARENA_W - 32, box_h), 1)
+            caret = "|" if int(now * 2) % 2 == 0 else " "
+            _text(s, self.f_mid, f"say:  {self.typed}{caret}", (26, top + 6), TEXT)
+            _text(s, self.f_small, "[Enter] send   [Esc] cancel",
+                  (ARENA_W - 210, top + 10), TEXT_DIM)
 
     def draw_overlay(self, s, snap):
         phase = snap["ph"]
@@ -599,7 +684,9 @@ class App:
         mid_x = WINDOW_W // 2 - 90
         _centered(c, self.f_mid, status, (mid_x, top + 12), TEXT)
         _centered(c, self.f_small, sub, (mid_x, top + 38), TEXT_DIM)
-        _centered(c, self.f_small, f"{int(self.net.ping_ms)}ms   [Esc] leave",
+        _centered(c, self.f_small,
+                  f"{int(self.net.ping_ms)}ms   [T] chat   [Esc] leave   "
+                  f"[F1/F2] map",
                   (mid_x, top + 62), TEXT_DIM)
 
         # --- right block: scoreboard, best round-wins first

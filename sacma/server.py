@@ -15,11 +15,13 @@ import argparse
 import asyncio
 import json
 import socket
+import sys
 import time
 
 from .game import Game
 from .shared import (
-    DEFAULT_PORT, DISCOVERY_MAGIC, DISCOVERY_PORT, MAX_PLAYERS, TICK_RATE,
+    CHAT_MAX_LEN, CHAT_MIN_GAP, DEFAULT_PORT, DISCOVERY_MAGIC, DISCOVERY_PORT,
+    MAX_PLAYERS, TICK_RATE,
 )
 
 
@@ -37,6 +39,7 @@ class Conn:
         self.name = "?"
         self.queue = asyncio.Queue(maxsize=120)
         self.open = True
+        self.last_chat = 0.0
 
     def send(self, obj):
         if not self.open:
@@ -54,9 +57,10 @@ class Conn:
 
 
 class Server:
-    def __init__(self, port, name):
+    def __init__(self, port, name, debug=True):
         self.port = port
         self.name = name
+        self.debug = debug
         self.game = Game()
         self.conns = set()
 
@@ -137,6 +141,19 @@ class Server:
 
         elif kind == "input" and conn.pid is not None:
             self.game.set_input(conn.pid, msg)
+
+        elif kind == "chat" and conn.pid is not None:
+            now = time.monotonic()
+            if now - conn.last_chat < CHAT_MIN_GAP:
+                return  # someone holding down enter; drop it silently
+            conn.last_chat = now
+            text = str(msg.get("text", ""))
+            self.game.chat(conn.pid, text)
+            print(f"<{conn.name}> {text[:CHAT_MAX_LEN]}")
+
+        elif kind == "map" and conn.pid is not None and self.debug:
+            self.game.jump_map(1 if msg.get("dir", 1) >= 0 else -1)
+            print(f"~~ {conn.name} switched to {self.game.map['name']}")
 
         elif kind == "ping":
             conn.send({"t": "pong", "ts": msg.get("ts")})
@@ -233,12 +250,24 @@ def main():
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--name", default=None,
                     help="Name shown in the client's server list.")
+    ap.add_argument("--no-debug", action="store_true",
+                    help="Stop clients cycling maps with [ and ]. Worth "
+                         "setting once people are actually competing.")
     args = ap.parse_args()
 
-    name = args.name or f"{socket.gethostname()}'s game"
-    print(f"\n== sacmagame server '{name}' on port {args.port} ==")
+    # Keep join/leave lines appearing live even when piped to a log file.
     try:
-        asyncio.run(Server(args.port, name).run())
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+
+    name = args.name or f"{socket.gethostname()}'s game"
+    debug = not args.no_debug
+    print(f"\n== sacmagame server '{name}' on port {args.port} ==")
+    if debug:
+        print("   debug map cycling is ON -- any player can press [ or ]")
+    try:
+        asyncio.run(Server(args.port, name, debug).run())
     except KeyboardInterrupt:
         print("\nserver stopped.")
 

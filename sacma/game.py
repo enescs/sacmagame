@@ -18,7 +18,7 @@ import random
 from .maps import MAPS, mover_rect, rotor_segment
 from .shared import (
     ARENA_H, ARENA_W, BORDER, BOX_RADIUS, BULLET_LIFETIME, BULLET_RADIUS,
-    BULLET_SPEED, COUNTDOWN_TIME, FIRE_COOLDOWN, LOOT_FIRST_DROP,
+    BULLET_SPEED, CHAT_MAX_LEN, COUNTDOWN_TIME, FIRE_COOLDOWN, LOOT_FIRST_DROP,
     LOOT_INTERVAL, LOOT_JITTER, LOOT_MAX_ON_FIELD, LOOT_SPREAD_X,
     LOOT_SPREAD_Y, MAG_SIZE, MAX_PLAYERS, PHASE_COUNTDOWN, PHASE_LIVE,
     PHASE_OVER, PHASE_WAITING, PLAYER_RADIUS, PLAYER_SPEED, POWERUPS,
@@ -151,6 +151,21 @@ class Game:
         except (TypeError, ValueError):
             pass
 
+    def chat(self, pid, text):
+        """Queue a player's message for the next broadcast.
+
+        Chat rides the normal event stream, so it reaches everyone in tick
+        order alongside kills and pickups and needs no extra plumbing.
+        """
+        p = self.players.get(pid)
+        if not p:
+            return
+        text = " ".join(str(text).split())[:CHAT_MAX_LEN]
+        if not text:
+            return
+        self.events.append({"kind": "chat", "pid": pid, "name": p.name,
+                            "color": p.color, "text": text})
+
     # -- map geometry ---------------------------------------------------------
 
     @property
@@ -220,6 +235,35 @@ class Game:
 
         self.phase = PHASE_COUNTDOWN
         self.phase_end = self.time + COUNTDOWN_TIME
+        self.events.append({
+            "kind": "round", "round": self.round_no,
+            "map": self.map_index, "name": self.map["name"],
+            "blurb": self.map["blurb"],
+        })
+
+    def jump_map(self, delta):
+        """Debug hook: hop to the next/previous map and restart on it.
+
+        Handy for eyeballing layouts without waiting out a round. Solo this
+        just reloads the arena; mid-match it restarts the round from the
+        countdown so nobody is dropped into a wall.
+        """
+        self.map_index = (self.map_index + delta) % len(MAPS)
+        self.map_time = 0.0
+        self._rebuild_geometry()
+
+        self.bullets.clear()
+        self.loot.clear()
+        self.next_loot = LOOT_FIRST_DROP
+
+        points = self._spawn_points()
+        for p in self.players.values():
+            self._spawn(p, points)
+
+        if self.phase != PHASE_WAITING:
+            self.phase = PHASE_COUNTDOWN
+            self.phase_end = self.time + COUNTDOWN_TIME
+
         self.events.append({
             "kind": "round", "round": self.round_no,
             "map": self.map_index, "name": self.map["name"],
