@@ -101,6 +101,9 @@ grabbing one usually means giving up your cover. Touch it to pick it up.
 | **Golden gun** | 5s — one round in the mag, slow reload, very fast, ignores shields |
 | **Reflect** | 5s — parries incoming bullets straight back, and they become yours |
 | **Homing** | 5s — your bullets curve into whoever is nearest |
+| **Ricochet** | 8s — your bullets bounce off walls up to 3 times, and never hit you |
+| **Frost** | 8s — your bullets leave a patch of ice where they land, slowing everyone but you |
+| **Time stop** | 1.5s — the whole arena freezes except you: nobody moves, nobody shoots, bullets hang in the air |
 
 Powerups are cleared when you die, so being loaded up isn't a guaranteed round.
 
@@ -115,6 +118,25 @@ A few interactions worth knowing:
 - **Golden gun overrides scatter** — it stays a single precise round.
 - **Homing bullets ignore their own shooter** and only track within 460px, so
   breaking line of sight and distance are both real counters.
+- **Ricochet rounds can never come back at you.** No bullet in the game can hit
+  the player who fired it, bounced or not, so you can safely bank shots off a
+  wall right next to you. Each bounce sheds a little speed and the round dies
+  after three, which keeps corridors from filling up with strays.
+- **Frost is area denial, not damage.** A patch is 74px across, lasts 3.5s and
+  cuts move speed to 55% for everyone standing in it except the player who laid
+  it — its rim is drawn in that player's colour, so you can see at a glance
+  whose ice you are about to step into. At most 8 patches exist at once.
+- **Frost stacks with ricochet.** A bounced frost round drops its patch
+  wherever it finally stops, which is how you get ice around a corner.
+- **Time stop fires the moment you touch the crate** — there is nothing to save
+  it for. For 1.5s everyone else is locked in place and cannot turn, shoot or
+  reload, rounds already in the air hang where they are, and the moving
+  obstacles stop with them. Your own shots still travel, so the window is worth
+  exactly one good angle. The round clock pauses too, so nobody loses a round to
+  a timer that ran while they were frozen.
+- **Bullets are drawn in their shooter's colour**, so in a crowded fight you can
+  always tell your rounds from everyone else's. A parried round changes colour
+  along with its new owner.
 
 ## Maps
 

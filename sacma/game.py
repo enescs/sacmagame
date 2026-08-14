@@ -17,15 +17,17 @@ import random
 
 from .maps import MAPS, mover_rect, rotor_segment
 from .shared import (
-    ARENA_H, ARENA_W, BF_GOLD, BF_HOMING, BF_PARRIED, BORDER, BOX_RADIUS,
+    ARENA_H, ARENA_W, BF_BOUNCE, BF_FROST, BF_GOLD, BF_HOMING, BF_PARRIED,
+    BORDER, BOUNCE_DAMP, BOUNCE_LIFETIME, BOUNCE_MAX, BOX_RADIUS,
     BULLET_LIFETIME, BULLET_RADIUS, BULLET_SPEED, CHAT_MAX_LEN, COUNTDOWN_TIME,
-    FIRE_COOLDOWN, GOLDEN_MAG, GOLDEN_RELOAD, GOLDEN_SPEED_MULT, HOMING_RANGE,
+    FIRE_COOLDOWN, FROST_MAX, FROST_RADIUS, FROST_SLOW, FROST_TIME,
+    GOLDEN_MAG, GOLDEN_RELOAD, GOLDEN_SPEED_MULT, HOLD_TIME, HOMING_RANGE,
     HOMING_TURN, LOOT_FIRST_DROP, LOOT_INTERVAL, LOOT_JITTER,
     LOOT_MAX_ON_FIELD, LOOT_SPREAD_X, LOOT_SPREAD_Y, MAG_SIZE, MAX_PLAYERS,
     PHASE_COUNTDOWN, PHASE_LIVE, PHASE_OVER, PHASE_WAITING, PLAYER_RADIUS,
-    PLAYER_SPEED, POWERUPS, POWERUP_BIT, POWERUP_DURATION, P_AMMO, P_GOLDEN,
-    P_HOMING, P_INVIS, P_RAPID, P_REFLECT, P_SCATTER, P_SHIELD, P_SWIFT,
-    P_VELOCITY, RAPID_MULT, REFLECT_SPEED_MULT, RELOAD_TIME, ROUND_OVER_TIME,
+    PLAYER_SPEED, POWERUPS, POWERUP_BIT, POWERUP_DURATION, P_AMMO, P_BOUNCE,
+    P_FROST, P_GOLDEN, P_HOLD, P_HOMING, P_INVIS, P_RAPID, P_REFLECT, P_SCATTER,
+    P_SHIELD, P_SWIFT, P_VELOCITY, RAPID_MULT, REFLECT_SPEED_MULT, RELOAD_TIME, ROUND_OVER_TIME,
     ROUND_TIME_LIMIT, SCATTER_ANGLE, SPREAD, SWIFT_MULT, VELOCITY_MULT,
     circle_hits_rect, clamp, closest_point_on_segment, point_in_rect,
     segment_hits_circle, segments_min_dist_sq,
@@ -71,16 +73,29 @@ class Player:
 
 
 class Bullet:
-    __slots__ = ("x", "y", "vx", "vy", "ttl", "owner", "flags")
+    __slots__ = ("x", "y", "vx", "vy", "ttl", "owner", "flags", "bounces")
 
     def __init__(self, x, y, vx, vy, owner, flags=0):
         self.x = x
         self.y = y
         self.vx = vx
         self.vy = vy
-        self.ttl = BULLET_LIFETIME
+        self.ttl = BOUNCE_LIFETIME if flags & BF_BOUNCE else BULLET_LIFETIME
         self.owner = owner
         self.flags = flags
+        self.bounces = BOUNCE_MAX if flags & BF_BOUNCE else 0
+
+
+class FrostZone:
+    """A patch of ice left where a frost round stopped."""
+
+    __slots__ = ("x", "y", "owner", "ttl")
+
+    def __init__(self, x, y, owner):
+        self.x = x
+        self.y = y
+        self.owner = owner
+        self.ttl = FROST_TIME
 
 
 class LootBox:
@@ -97,6 +112,7 @@ class Game:
     def __init__(self):
         self.players = {}
         self.bullets = []
+        self.frost = []
         self.loot = []
         self.time = 0.0
         self.tick = 0
@@ -109,6 +125,8 @@ class Game:
         self.map_time = 0.0    # obstacle clock, reset per round so it is fair
         self.next_loot = 0.0
         self.last_winner = ""
+        self.hold_until = 0.0  # arena is frozen for everyone but hold_pid
+        self.hold_pid = 0
 
         self._next_pid = 1
         self._next_bid = 1
@@ -142,6 +160,10 @@ class Game:
         if not p:
             return
         self.bullets = [b for b in self.bullets if b.owner != pid]
+        if self.hold_pid == pid:
+            # Never leave the arena frozen for a player who is gone.
+            self.hold_until = 0.0
+            self.hold_pid = 0
         self.events.append({"kind": "leave", "name": p.name, "color": p.color})
 
     def set_input(self, pid, data):
@@ -230,7 +252,10 @@ class Game:
         self._rebuild_geometry()
 
         self.bullets.clear()
+        self.frost.clear()
         self.loot.clear()
+        self.hold_until = 0.0
+        self.hold_pid = 0
         self.next_loot = LOOT_FIRST_DROP
 
         points = self._spawn_points()
@@ -257,7 +282,10 @@ class Game:
         self._rebuild_geometry()
 
         self.bullets.clear()
+        self.frost.clear()
         self.loot.clear()
+        self.hold_until = 0.0
+        self.hold_pid = 0
         self.next_loot = LOOT_FIRST_DROP
 
         points = self._spawn_points()
@@ -328,9 +356,19 @@ class Game:
         self.tick += 1
         self.time += dt
 
+        held = self.hold_until > self.time
+        if held:
+            # A time stop takes the round clock with it, so nobody loses the
+            # round to a timer that ran while they could not move.
+            self.phase_end += dt
+        elif self.hold_pid:
+            self.events.append({"kind": "unhold"})
+            self.hold_pid = 0
+
         # Obstacles only run during a round, so the countdown always starts
-        # from the same configuration on every map.
-        if self.phase in (PHASE_LIVE, PHASE_WAITING):
+        # from the same configuration on every map. A time stop halts them too:
+        # the whole arena freezes, not just the players in it.
+        if self.phase in (PHASE_LIVE, PHASE_WAITING) and not held:
             self.map_time += dt
         self._rebuild_geometry()
 
@@ -340,16 +378,21 @@ class Game:
         can_act = self.phase == PHASE_LIVE or free_play
 
         for p in self.players.values():
-            p.aim = p.inp["aim"]
+            frozen = held and p.pid != self.hold_pid
+            if not frozen:
+                # Frozen players cannot even turn on the spot.
+                p.aim = p.inp["aim"]
             if not p.alive or p.waiting:
                 continue
 
-            if can_act:
+            if can_act and not frozen:
                 self._move_player(p, dt)
                 self._weapon(p, dt)
             self._push_out(p)
 
-        self._step_bullets(dt)
+        self._step_bullets(dt, held)
+        if not held:
+            self._step_frost(dt)
         if can_act:
             self._step_loot(dt)
 
@@ -359,6 +402,8 @@ class Game:
         if not (dx or dy):
             return
         speed = PLAYER_SPEED * (SWIFT_MULT if p.has(P_SWIFT, self.time) else 1.0)
+        if self._in_frost(p):
+            speed *= FROST_SLOW
         inv = speed * dt / math.hypot(dx, dy)
         self._slide(p, dx * inv, 0.0)
         self._slide(p, 0.0, dy * inv)
@@ -422,6 +467,39 @@ class Game:
         p.x = clamp(p.x, PLAYER_RADIUS, ARENA_W - PLAYER_RADIUS)
         p.y = clamp(p.y, PLAYER_RADIUS, ARENA_H - PLAYER_RADIUS)
 
+    # -- frost ----------------------------------------------------------------
+
+    def _step_frost(self, dt):
+        for z in self.frost:
+            z.ttl -= dt
+        self.frost = [z for z in self.frost if z.ttl > 0.0]
+
+    def _in_frost(self, p):
+        """True if `p` is standing in someone else's ice."""
+        reach = FROST_RADIUS + PLAYER_RADIUS
+        for z in self.frost:
+            if z.owner == p.pid:
+                continue
+            if (p.x - z.x) ** 2 + (p.y - z.y) ** 2 <= reach * reach:
+                return True
+        return False
+
+    def _drop_frost(self, b, x=None, y=None):
+        """Leave a patch where a frost round came to rest.
+
+        Wall impacts pass the last position outside the wall, so the patch
+        lands on the floor you can actually walk on rather than half-buried in
+        the geometry.
+        """
+        if not b.flags & BF_FROST:
+            return
+        x = b.x if x is None else x
+        y = b.y if y is None else y
+        if len(self.frost) >= FROST_MAX:
+            del self.frost[0]
+        self.frost.append(FrostZone(x, y, b.owner))
+        self.events.append({"kind": "frost", "x": x, "y": y})
+
     # -- weapon ---------------------------------------------------------------
 
     def _mag_size(self, p):
@@ -480,7 +558,9 @@ class Game:
         elif p.has(P_VELOCITY, self.time):
             speed *= VELOCITY_MULT
 
-        flags = (BF_GOLD if golden else 0) | (BF_HOMING if homing else 0)
+        flags = ((BF_GOLD if golden else 0) | (BF_HOMING if homing else 0)
+                 | (BF_BOUNCE if p.has(P_BOUNCE, self.time) else 0)
+                 | (BF_FROST if p.has(P_FROST, self.time) else 0))
         # The golden gun stays a single precise round even under scatter.
         offsets = ((-SCATTER_ANGLE, 0.0, SCATTER_ANGLE)
                    if p.has(P_SCATTER, self.time) and not golden else (0.0,))
@@ -523,11 +603,19 @@ class Game:
         cur += clamp(diff, -limit, limit)
         b.vx, b.vy = math.cos(cur) * speed, math.sin(cur) * speed
 
-    def _step_bullets(self, dt):
+    def _step_bullets(self, dt, held=False):
         alive = []
         for b in self.bullets:
+            # During a time stop everything already in the air hangs there --
+            # its fuse stops too -- while the holder's own shots fly as normal,
+            # which is the whole point of stopping time.
+            if held and b.owner != self.hold_pid:
+                alive.append(b)
+                continue
+
             b.ttl -= dt
             if b.ttl <= 0.0:
+                self._drop_frost(b)
                 continue
 
             if b.flags & BF_HOMING:
@@ -538,8 +626,11 @@ class Game:
             b.y += b.vy * dt
 
             if self._bullet_blocked(x0, y0, b.x, b.y):
-                self.events.append({"kind": "spark", "x": b.x, "y": b.y})
-                continue
+                if not self._bounce(b, x0, y0):
+                    self.events.append({"kind": "spark", "x": b.x, "y": b.y})
+                    self._drop_frost(b, x0, y0)
+                    continue
+                self.events.append({"kind": "ricochet", "x": b.x, "y": b.y})
 
             # Swept test against players: at 760 px/s a bullet covers ~13 px per
             # tick and players are 28 px across, so a point test would nearly
@@ -556,6 +647,8 @@ class Game:
 
             if victim is None or self._resolve_hit(victim, b):
                 alive.append(b)
+            else:
+                self._drop_frost(b)
         self.bullets = alive
 
     def _bullet_blocked(self, x0, y0, x1, y1):
@@ -568,6 +661,74 @@ class Game:
                                     bx0, by0, bx1, by1) <= reach * reach:
                 return True
         return False
+
+    def _bounce(self, b, x0, y0):
+        """Reflect a ricochet round off whatever it just hit.
+
+        Returns False when the round has no bounces left (or never had any), in
+        which case the caller kills it as usual. Walls flip a single axis --
+        recovered by asking which axis of this tick's step actually carried the
+        round inside -- while rotor bars use the true surface normal, since they
+        sit at arbitrary angles.
+        """
+        if not b.flags & BF_BOUNCE or b.bounces <= 0:
+            return False
+
+        vx, vy = b.vx, b.vy
+        hit = False
+
+        for bx0, by0, bx1, by1, rad in self.bars:
+            cx, cy = closest_point_on_segment(b.x, b.y, bx0, by0, bx1, by1)
+            nx, ny = b.x - cx, b.y - cy
+            n = math.hypot(nx, ny)
+            reach = rad + BULLET_RADIUS
+            if n > reach:
+                continue
+            if n < 1e-6:
+                # Dead centre on the bar: just turn it around.
+                vx, vy = -vx, -vy
+            else:
+                nx, ny = nx / n, ny / n
+                dot = 2.0 * (vx * nx + vy * ny)
+                vx, vy = vx - dot * nx, vy - dot * ny
+            hit = True
+            break
+
+        if not hit:
+            flip_x = flip_y = False
+            for rect in self.rects:
+                if not point_in_rect(b.x, b.y, rect):
+                    continue
+                inx = not point_in_rect(x0, b.y, rect)
+                iny = not point_in_rect(b.x, y0, rect)
+                if not inx and not iny:
+                    # Clipped a corner: neither axis alone was outside.
+                    inx = iny = True
+                flip_x = flip_x or inx
+                flip_y = flip_y or iny
+                hit = True
+            if not hit:
+                return False
+            if flip_x:
+                vx = -vx
+            if flip_y:
+                vy = -vy
+
+        b.bounces -= 1
+        b.vx, b.vy = vx * BOUNCE_DAMP, vy * BOUNCE_DAMP
+
+        # Restart from where the step began and nudge clear along the new
+        # heading, so the round never spawns inside the surface it just hit.
+        speed = math.hypot(b.vx, b.vy)
+        if speed < 1e-6:
+            return False
+        step = BULLET_RADIUS + 2
+        b.x = x0 + b.vx / speed * step
+        b.y = y0 + b.vy / speed * step
+        if self._bullet_blocked(b.x, b.y, b.x, b.y):
+            # Wedged in a corner or a mover closed on it; let it die.
+            return False
+        return True
 
     def _resolve_hit(self, victim, bullet):
         """Apply a bullet that reached a player. Returns True if it lives on."""
@@ -665,6 +826,12 @@ class Game:
         if kind == P_AMMO:
             p.ammo = MAG_SIZE
             p.reload_left = 0.0
+        elif kind == P_HOLD:
+            # Fires the instant it is picked up; there is nothing to hold on to.
+            self.hold_until = self.time + HOLD_TIME
+            self.hold_pid = p.pid
+            self.events.append({"kind": "hold", "pid": p.pid, "name": p.name,
+                                "color": p.color, "x": p.x, "y": p.y})
         elif kind == P_GOLDEN:
             # Hand over a loaded golden gun rather than whatever was left.
             p.ammo = GOLDEN_MAG
@@ -730,6 +897,13 @@ class Game:
                   for b in self.bullets],
             "l": [[box.bid, round(box.x, 1), round(box.y, 1), box.kind]
                   for box in self.loot],
+            # Ice patches: position, who laid it (they walk through freely) and
+            # how much life is left, which the client fades out.
+            "f": [[round(z.x, 1), round(z.y, 1), z.owner,
+                   round(z.ttl / FROST_TIME, 2)] for z in self.frost],
+            # Time stop: seconds left, and who is still allowed to move.
+            "hd": round(max(0.0, self.hold_until - now), 2),
+            "hp": self.hold_pid,
             # Obstacles are a pure function of the map clock, and clients have
             # the same maps.py, so one float keeps every screen in lockstep.
             "mt": round(self.map_time, 3),

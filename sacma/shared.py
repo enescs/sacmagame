@@ -86,9 +86,12 @@ P_INVIS = "invis"
 P_GOLDEN = "golden"
 P_REFLECT = "reflect"
 P_HOMING = "homing"
+P_BOUNCE = "bounce"
+P_FROST = "frost"
+P_HOLD = "hold"
 
 POWERUPS = [P_SHIELD, P_AMMO, P_RAPID, P_VELOCITY, P_SWIFT, P_SCATTER,
-            P_INVIS, P_GOLDEN, P_REFLECT, P_HOMING]
+            P_INVIS, P_GOLDEN, P_REFLECT, P_HOMING, P_BOUNCE, P_FROST, P_HOLD]
 POWERUP_BIT = {name: 1 << i for i, name in enumerate(POWERUPS)}
 
 POWERUP_DURATION = {
@@ -104,6 +107,9 @@ POWERUP_DURATION = {
     P_GOLDEN: 5.0,
     P_REFLECT: 5.0,
     P_HOMING: 5.0,
+    P_BOUNCE: 8.0,
+    P_FROST: 8.0,
+    P_HOLD: 1.5,   # must match HOLD_TIME: the effect *is* the duration
 }
 
 POWERUP_LABEL = {
@@ -117,6 +123,9 @@ POWERUP_LABEL = {
     P_GOLDEN: "GOLDEN GUN",
     P_REFLECT: "REFLECT",
     P_HOMING: "HOMING",
+    P_BOUNCE: "RICOCHET",
+    P_FROST: "FROST",
+    P_HOLD: "TIME STOP",
 }
 
 POWERUP_COLOR = {
@@ -130,6 +139,9 @@ POWERUP_COLOR = {
     P_GOLDEN: (255, 214, 92),
     P_REFLECT: (120, 255, 224),
     P_HOMING: (255, 128, 200),
+    P_BOUNCE: (255, 246, 143),
+    P_FROST: (168, 246, 255),
+    P_HOLD: (226, 214, 255),
 }
 
 RAPID_MULT = 0.38       # fire cooldown multiplier
@@ -154,10 +166,36 @@ REFLECT_SPEED_MULT = 1.15
 HOMING_TURN = 6.0       # radians per second
 HOMING_RANGE = 460.0    # px; beyond this a bullet flies straight
 
+# Ricochet: rounds bounce off walls and rotor bars for a short while. They can
+# never hit the player who fired them -- the sim skips the owner in every hit
+# test -- so the risk is purely that a stray angle comes back at a teammate's
+# position, not at you. A short leash keeps a bounced round from pinballing
+# around the arena long after the fight moved on.
+BOUNCE_MAX = 3          # wall hits before the round dies
+BOUNCE_DAMP = 0.94      # speed kept per bounce
+BOUNCE_LIFETIME = 2.2   # seconds; longer than a plain round so bounces land
+
 # Bullet flags, so clients can draw special rounds differently.
 BF_GOLD = 1
 BF_HOMING = 2
 BF_PARRIED = 4
+BF_BOUNCE = 8
+BF_FROST = 16
+
+# Frost: a round leaves a patch of ice wherever it finally stops. Everyone who
+# walks through one is slowed -- except the player who fired it, so you can lay
+# a field down across your own escape route. Zones are area denial rather than
+# damage, so they are generous in size and short in life.
+FROST_RADIUS = 74.0
+FROST_TIME = 3.5     # seconds a patch lingers
+FROST_SLOW = 0.55    # move speed multiplier inside one
+FROST_MAX = 8        # patches on the field at once, oldest dropped first
+
+# Time stop: picking one up halts the entire arena -- every other player, every
+# bullet already in the air, and the moving obstacles -- for a moment. The
+# holder keeps playing, and rounds they fire during the stop still travel, so
+# the window is long enough to line up one shot and no longer.
+HOLD_TIME = 1.5
 
 # --- presentation ------------------------------------------------------------
 

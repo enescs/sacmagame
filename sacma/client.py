@@ -11,6 +11,7 @@ positions (a pure function of the map clock the server sends) and particles.
 
 import argparse
 import math
+import os
 import random
 import socket
 import sys
@@ -21,18 +22,67 @@ import pygame
 from .maps import MAPS, mover_rect, rotor_segment
 from .net import Discovery, NetClient
 from .shared import (
-    ARENA_H, ARENA_W, BF_GOLD, BF_HOMING, BF_PARRIED, BG, BORDER, BOX_RADIUS,
+    ARENA_H, ARENA_W, BF_BOUNCE, BF_FROST, BF_GOLD, BF_HOMING, BF_PARRIED, BG,
+    BORDER, BOX_RADIUS, FROST_RADIUS,
     BULLET_RADIUS, CHAT_MAX_LEN, CHAT_MAX_LINES, CHAT_SHOW_TIME, DEFAULT_PORT,
     GRID, HAZARD_EDGE, HAZARD_FILL, HUD_BG, HUD_H, MAG_SIZE, PHASE_COUNTDOWN,
     PHASE_LIVE, PHASE_OVER, PHASE_WAITING, PLAYER_COLORS, PLAYER_RADIUS,
-    POWERUPS, POWERUP_BIT, POWERUP_COLOR, POWERUP_LABEL, P_GOLDEN, P_HOMING,
-    P_INVIS, P_REFLECT, P_SHIELD, TEXT, TEXT_DIM, WALL_EDGE, WALL_FILL,
+    POWERUPS, POWERUP_BIT, POWERUP_COLOR, POWERUP_LABEL, P_BOUNCE, P_FROST,
+    P_GOLDEN, P_HOLD, P_HOMING, P_INVIS, P_REFLECT, P_SHIELD, TEXT, TEXT_DIM,
+    WALL_EDGE, WALL_FILL,
     WINDOW_H, WINDOW_W,
 )
 
 # Snapshot player-row indices, mirroring Game.snapshot().
 P_ID, P_X, P_Y, P_AIM, P_ALIVE, P_AMMO, P_RELOAD, P_BITS = 0, 1, 2, 3, 4, 5, 6, 7
 P_WINS, P_KILLS, P_DEATHS, P_WAIT, P_HID = 8, 9, 10, 11, 12
+
+
+ICON_DIR = os.path.join(os.path.dirname(__file__), "assets", "powerups")
+ICON_SIZE = 20  # 16x16 art, drawn slightly enlarged to fill the crate
+
+# Art named for the powerup as a player would say it rather than for the key
+# the sim uses; both spellings load. Keys are written out literally because
+# P_AMMO in this module is a snapshot column index, not the powerup name.
+ICON_ALIASES = {
+    "ammo": ("infammo",),
+    "rapid": ("rapidfire",),
+    "velocity": ("hotrounds",),
+    "swift": ("sprint",),
+    "invis": ("invisible",),
+    "golden": ("goldengun",),
+    "bounce": ("recochet", "ricochet"),
+    "hold": ("timestop",),
+}
+
+
+def load_powerup_icons():
+    """Load `assets/powerups/<kind>.png` for every powerup, if it is there.
+
+    Entirely optional: anything missing falls back to the lettered crate, so
+    the game runs from a bare checkout and new art can be dropped in one file
+    at a time without touching any code.
+    """
+    icons = {}
+    for name in POWERUPS:
+        for stem in (name,) + ICON_ALIASES.get(name, ()):
+            path = os.path.join(ICON_DIR, stem + ".png")
+            if not os.path.exists(path):
+                continue
+            try:
+                img = pygame.image.load(path).convert_alpha()
+            except pygame.error:
+                continue
+            if img.get_size() != (ICON_SIZE, ICON_SIZE):
+                img = pygame.transform.smoothscale(img, (ICON_SIZE, ICON_SIZE))
+            icons[name] = img
+            break
+    return icons
+
+
+def mix(a, b, t):
+    """Blend two colours; t=0 gives `a`, t=1 gives `b`."""
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 # Debug map cycling. F1/F2 are the advertised pair; PageUp/PageDown are bound
 # too for anyone on a laptop that steals the function row for brightness.
@@ -122,6 +172,8 @@ class App:
         self.f_mid = pygame.font.Font(None, 26)
         self.f_big = pygame.font.Font(None, 44)
         self.f_huge = pygame.font.Font(None, 92)
+
+        self.icons = load_powerup_icons()
 
         self.name = name
         self.net = None
@@ -327,6 +379,22 @@ class App:
                 self.fx.burst(ev["x"], ev["y"], (255, 226, 160),
                               count=6, speed=150, life=0.25)
 
+            elif kind == "hold":
+                col = POWERUP_COLOR[P_HOLD]
+                self.fx.ring(ev["x"], ev["y"], col, r0=10, r1=520, life=0.5,
+                             width=6)
+                self.fx.ring(ev["x"], ev["y"], col, r0=10, r1=300, life=0.35,
+                             width=3)
+                self.push_feed(f"{ev['name']} stopped time", col)
+
+            elif kind == "frost":
+                self.fx.ring(ev["x"], ev["y"], POWERUP_COLOR[P_FROST],
+                             r0=8, r1=int(FROST_RADIUS), life=0.35, width=3)
+
+            elif kind == "ricochet":
+                self.fx.burst(ev["x"], ev["y"], POWERUP_COLOR[P_BOUNCE],
+                              count=5, speed=120, life=0.2)
+
             elif kind == "kill":
                 col = PLAYER_COLORS[ev["victim_color"] % len(PLAYER_COLORS)]
                 self.fx.burst(ev["x"], ev["y"], col, count=18, speed=260,
@@ -513,38 +581,143 @@ class App:
             pygame.draw.circle(s, HAZARD_EDGE, (int(x1), int(y1)), int(rad), 2)
             pygame.draw.circle(s, HAZARD_EDGE, (int(rt[0]), int(rt[1])), 5)
 
+        # Ice goes under everything that moves, so it reads as ground cover
+        # rather than as another thing flying around.
+        for zx, zy, zowner, zlife in snap.get("f", ()):
+            self.draw_frost(s, zx, zy, zowner, zlife)
+
         for bid, bx, by, kind in snap["l"]:
             self.draw_box(s, bx, by, kind)
 
         for bullet in snap["b"]:
-            bx, by = bullet[0], bullet[1]
-            fl = bullet[3] if len(bullet) > 3 else 0
-            if fl & BF_GOLD:
-                outer, inner, rad = POWERUP_COLOR[P_GOLDEN], (255, 250, 225), 2
-            elif fl & BF_HOMING:
-                outer, inner, rad = POWERUP_COLOR[P_HOMING], (255, 235, 250), 1
-            elif fl & BF_PARRIED:
-                outer, inner, rad = POWERUP_COLOR[P_REFLECT], (235, 255, 250), 1
-            else:
-                outer, inner, rad = (255, 240, 190), (255, 255, 255), 0
-            pygame.draw.circle(s, outer, (int(bx), int(by)),
-                               BULLET_RADIUS + 2 + rad)
-            pygame.draw.circle(s, inner, (int(bx), int(by)),
-                               BULLET_RADIUS - 1 + rad)
+            self.draw_bullet(s, bullet)
 
         for row in snap["p"]:
             self.draw_player(s, row)
 
+        if snap.get("hd", 0) > 0:
+            self.draw_hold(s, snap)
+
+    def draw_hold(self, s, snap):
+        """Tint the arena while time is stopped and mark who is still moving.
+
+        Everything on screen is already standing still because the server sent
+        it that way; this just makes it obvious that it is a time stop and not
+        a dropped connection.
+        """
+        col = POWERUP_COLOR[P_HOLD]
+        holder = snap.get("hp", 0)
+        mine = holder == self.net.my_id
+
+        veil = pygame.Surface((ARENA_W, ARENA_H), pygame.SRCALPHA)
+        veil.fill(col + (26,))
+        s.blit(veil, (0, 0))
+        pygame.draw.rect(s, col, (0, 0, ARENA_W, ARENA_H), 3)
+
+        # A halo on the one player who can still act.
+        for row in snap["p"]:
+            if row[P_ID] != holder or not row[P_ALIVE] or row[P_WAIT]:
+                continue
+            pygame.draw.circle(s, col, (int(row[P_X]), int(row[P_Y])),
+                               PLAYER_RADIUS + 12, 2)
+
+        info = self.net.roster.get(holder, {})
+        who = "YOU" if mine else info.get("name", "?")
+        label = self.f_big.render(f"TIME STOP -- {who}", True, col)
+        s.blit(label, label.get_rect(center=(ARENA_W // 2, 70)))
+
+    def draw_frost(self, s, x, y, owner, life):
+        """Draw one ice patch, fading as it expires.
+
+        The rim carries the colour of whoever laid it, since that is also who
+        can run through it at full speed -- your own patches are safe ground.
+        """
+        r = int(FROST_RADIUS)
+        info = self.net.roster.get(owner, {})
+        rim = PLAYER_COLORS[info.get("color", 5) % len(PLAYER_COLORS)]
+        cold = POWERUP_COLOR[P_FROST]
+
+        layer = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+        pygame.draw.circle(layer, cold + (int(60 * life),), (r, r), r)
+        pygame.draw.circle(layer, cold + (int(120 * life),), (r, r), r, 2)
+        pygame.draw.circle(layer, rim + (int(150 * life),), (r, r), r - 3, 1)
+        # A couple of shards so the patch has some texture at a glance.
+        for i in range(6):
+            a = i * math.pi / 3 + x * 0.01
+            pygame.draw.line(
+                layer, cold + (int(90 * life),),
+                (r + math.cos(a) * r * 0.35, r + math.sin(a) * r * 0.35),
+                (r + math.cos(a) * r * 0.8, r + math.sin(a) * r * 0.8), 2)
+        s.blit(layer, (int(x) - r, int(y) - r))
+
+    def draw_bullet(self, s, bullet):
+        """Draw a round in its shooter's colour.
+
+        Whose bullet a round is matters more in the moment than what kind it
+        is, so the body always carries the owner's player colour and the
+        special-round accent is demoted to a halo and a bright core. Ownership
+        follows a parry, so a reflected round changes colour with it.
+        """
+        bx, by, owner = bullet[0], bullet[1], bullet[2]
+        fl = bullet[3] if len(bullet) > 3 else 0
+
+        info = self.net.roster.get(owner, {})
+        body = PLAYER_COLORS[info.get("color", 5) % len(PLAYER_COLORS)]
+
+        rad = 0
+        if fl & BF_GOLD:
+            halo, core, rad = POWERUP_COLOR[P_GOLDEN], (255, 250, 225), 2
+        elif fl & BF_HOMING:
+            halo, core, rad = POWERUP_COLOR[P_HOMING], (255, 235, 250), 1
+        elif fl & BF_PARRIED:
+            halo, core, rad = POWERUP_COLOR[P_REFLECT], (235, 255, 250), 1
+        elif fl & BF_FROST:
+            halo, core, rad = POWERUP_COLOR[P_FROST], (240, 255, 255), 1
+        elif fl & BF_BOUNCE:
+            halo, core, rad = POWERUP_COLOR[P_BOUNCE], (255, 255, 240), 1
+        else:
+            halo, core = mix(body, BG, 0.45), mix(body, (255, 255, 255), 0.7)
+
+        pos = (int(bx), int(by))
+        pygame.draw.circle(s, halo, pos, BULLET_RADIUS + 3 + rad)
+        pygame.draw.circle(s, body, pos, BULLET_RADIUS + 1 + rad)
+        pygame.draw.circle(s, core, pos, max(1, BULLET_RADIUS - 1 + rad))
+
     def draw_box(self, s, x, y, kind):
         col = POWERUP_COLOR.get(kind, (255, 255, 255))
-        a = time.time() * 2.0
-        pts = [(x + math.cos(a + i * math.pi / 2) * BOX_RADIUS,
-                y + math.sin(a + i * math.pi / 2) * BOX_RADIUS)
-               for i in range(4)]
-        pygame.draw.polygon(s, col, pts)
-        pygame.draw.polygon(s, (255, 255, 255), pts, 2)
-        letter = self.f_small.render(POWERUP_LABEL[kind][0], True, (20, 20, 26))
-        s.blit(letter, letter.get_rect(center=(int(x), int(y))))
+        icon = self.icons.get(kind)
+        x, y = int(x), int(y)
+
+        if icon is None:
+            # No art yet: the old spinning diamond with the label's initial.
+            # Several labels share a first letter, so this is a placeholder.
+            a = time.time() * 2.0
+            pts = [(x + math.cos(a + i * math.pi / 2) * BOX_RADIUS,
+                    y + math.sin(a + i * math.pi / 2) * BOX_RADIUS)
+                   for i in range(4)]
+            pygame.draw.polygon(s, col, pts)
+            pygame.draw.polygon(s, (255, 255, 255), pts, 2)
+            letter = self.f_small.render(POWERUP_LABEL[kind][0], True,
+                                         (20, 20, 26))
+            s.blit(letter, letter.get_rect(center=(x, y)))
+            return
+
+        # With art, the crate becomes a dark plate ringed in the powerup's
+        # colour. Filling it with that colour instead would wash out any icon
+        # drawn in a similar hue -- an icy icon on an icy crate is invisible --
+        # and a square holds a 16x16 sprite that a spinning diamond clips.
+        r = ICON_SIZE // 2 + 4
+        pulse = 1 + 0.5 * math.sin(time.time() * 3.0)
+        plate = pygame.Rect(x - r, y - r, r * 2, r * 2)
+        glow = pygame.Surface((r * 2 + 8, r * 2 + 8), pygame.SRCALPHA)
+        pygame.draw.rect(glow, col + (int(40 + 30 * pulse),),
+                         glow.get_rect(), border_radius=6)
+        s.blit(glow, (x - r - 4, y - r - 4))
+        pygame.draw.rect(s, (16, 18, 26), plate, border_radius=4)
+        pygame.draw.rect(s, col, plate, 2, border_radius=4)
+        # The icon never rotates: a spinning glyph is unreadable at 20px, and
+        # reading it at a glance is the whole job.
+        s.blit(icon, icon.get_rect(center=(x, y)))
 
     def draw_player(self, s, row):
         if not row[P_ALIVE] or row[P_WAIT]:
