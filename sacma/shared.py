@@ -82,8 +82,13 @@ P_RAPID = "rapid"
 P_VELOCITY = "velocity"
 P_SWIFT = "swift"
 P_SCATTER = "scatter"
+P_INVIS = "invis"
+P_GOLDEN = "golden"
+P_REFLECT = "reflect"
+P_HOMING = "homing"
 
-POWERUPS = [P_SHIELD, P_AMMO, P_RAPID, P_VELOCITY, P_SWIFT, P_SCATTER]
+POWERUPS = [P_SHIELD, P_AMMO, P_RAPID, P_VELOCITY, P_SWIFT, P_SCATTER,
+            P_INVIS, P_GOLDEN, P_REFLECT, P_HOMING]
 POWERUP_BIT = {name: 1 << i for i, name in enumerate(POWERUPS)}
 
 POWERUP_DURATION = {
@@ -95,6 +100,10 @@ POWERUP_DURATION = {
     P_VELOCITY: 12.0,
     P_SWIFT: 10.0,
     P_SCATTER: 10.0,
+    P_INVIS: 3.0,
+    P_GOLDEN: 5.0,
+    P_REFLECT: 5.0,
+    P_HOMING: 5.0,
 }
 
 POWERUP_LABEL = {
@@ -104,6 +113,10 @@ POWERUP_LABEL = {
     P_VELOCITY: "HOT ROUNDS",
     P_SWIFT: "SPRINT",
     P_SCATTER: "SCATTER",
+    P_INVIS: "INVISIBLE",
+    P_GOLDEN: "GOLDEN GUN",
+    P_REFLECT: "REFLECT",
+    P_HOMING: "HOMING",
 }
 
 POWERUP_COLOR = {
@@ -113,12 +126,38 @@ POWERUP_COLOR = {
     P_VELOCITY: (255, 145, 77),
     P_SWIFT: (158, 232, 148),
     P_SCATTER: (198, 160, 246),
+    P_INVIS: (150, 158, 186),
+    P_GOLDEN: (255, 214, 92),
+    P_REFLECT: (120, 255, 224),
+    P_HOMING: (255, 128, 200),
 }
 
 RAPID_MULT = 0.38       # fire cooldown multiplier
 VELOCITY_MULT = 1.7     # bullet speed multiplier
 SWIFT_MULT = 1.45       # move speed multiplier
 SCATTER_ANGLE = 0.13    # radians between scatter pellets
+
+# Golden gun: one shot in the magazine, slow to reload, but the round is fast
+# and goes straight through a shield. Overrides scatter -- it stays a rifle.
+GOLDEN_MAG = 1
+GOLDEN_RELOAD = 2.2
+GOLDEN_SPEED_MULT = 2.6
+
+# Reflect: a parried round is sent back the way it came, and now belongs to
+# whoever parried it, so a good parry is a kill.
+REFLECT_SPEED_MULT = 1.15
+
+# Homing: steering is rate-limited so bullets curve rather than snap, which
+# leaves cover and distance as real counters. Turn radius is speed/turn, so
+# 6.0 gives ~127px -- tight enough to actually come around on someone at
+# mid-range, where 3.2 just sailed past them.
+HOMING_TURN = 6.0       # radians per second
+HOMING_RANGE = 460.0    # px; beyond this a bullet flies straight
+
+# Bullet flags, so clients can draw special rounds differently.
+BF_GOLD = 1
+BF_HOMING = 2
+BF_PARRIED = 4
 
 # --- presentation ------------------------------------------------------------
 

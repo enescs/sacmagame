@@ -97,8 +97,24 @@ grabbing one usually means giving up your cover. Touch it to pick it up.
 | **Hot rounds** | 1.7x bullet speed for 12s |
 | **Sprint** | 1.45x move speed for 10s |
 | **Scatter** | three bullets per shot for 10s |
+| **Invisible** | 3s — nobody can see you, but your bullets still show |
+| **Golden gun** | 5s — one round in the mag, slow reload, very fast, ignores shields |
+| **Reflect** | 5s — parries incoming bullets straight back, and they become yours |
+| **Homing** | 5s — your bullets curve into whoever is nearest |
 
 Powerups are cleared when you die, so being loaded up isn't a guaranteed round.
+
+A few interactions worth knowing:
+
+- **Invisibility is enforced on the server** — your position is never sent to
+  other clients, so it can't be defeated by fiddling with the game. Firing
+  doesn't produce a muzzle flash while cloaked, but the bullets themselves are
+  visible, so shooting still gives away roughly where you are.
+- **Golden gun beats shield, reflect beats golden gun.** A parry sends the
+  round back with the parrier as its owner, so a good parry scores the kill.
+- **Golden gun overrides scatter** — it stays a single precise round.
+- **Homing bullets ignore their own shooter** and only track within 460px, so
+  breaking line of sight and distance are both real counters.
 
 ## Maps
 

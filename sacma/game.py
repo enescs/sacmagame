@@ -17,13 +17,15 @@ import random
 
 from .maps import MAPS, mover_rect, rotor_segment
 from .shared import (
-    ARENA_H, ARENA_W, BORDER, BOX_RADIUS, BULLET_LIFETIME, BULLET_RADIUS,
-    BULLET_SPEED, CHAT_MAX_LEN, COUNTDOWN_TIME, FIRE_COOLDOWN, LOOT_FIRST_DROP,
-    LOOT_INTERVAL, LOOT_JITTER, LOOT_MAX_ON_FIELD, LOOT_SPREAD_X,
-    LOOT_SPREAD_Y, MAG_SIZE, MAX_PLAYERS, PHASE_COUNTDOWN, PHASE_LIVE,
-    PHASE_OVER, PHASE_WAITING, PLAYER_RADIUS, PLAYER_SPEED, POWERUPS,
-    POWERUP_BIT, POWERUP_DURATION, P_AMMO, P_RAPID, P_SCATTER, P_SHIELD,
-    P_SWIFT, P_VELOCITY, RAPID_MULT, RELOAD_TIME, ROUND_OVER_TIME,
+    ARENA_H, ARENA_W, BF_GOLD, BF_HOMING, BF_PARRIED, BORDER, BOX_RADIUS,
+    BULLET_LIFETIME, BULLET_RADIUS, BULLET_SPEED, CHAT_MAX_LEN, COUNTDOWN_TIME,
+    FIRE_COOLDOWN, GOLDEN_MAG, GOLDEN_RELOAD, GOLDEN_SPEED_MULT, HOMING_RANGE,
+    HOMING_TURN, LOOT_FIRST_DROP, LOOT_INTERVAL, LOOT_JITTER,
+    LOOT_MAX_ON_FIELD, LOOT_SPREAD_X, LOOT_SPREAD_Y, MAG_SIZE, MAX_PLAYERS,
+    PHASE_COUNTDOWN, PHASE_LIVE, PHASE_OVER, PHASE_WAITING, PLAYER_RADIUS,
+    PLAYER_SPEED, POWERUPS, POWERUP_BIT, POWERUP_DURATION, P_AMMO, P_GOLDEN,
+    P_HOMING, P_INVIS, P_RAPID, P_REFLECT, P_SCATTER, P_SHIELD, P_SWIFT,
+    P_VELOCITY, RAPID_MULT, REFLECT_SPEED_MULT, RELOAD_TIME, ROUND_OVER_TIME,
     ROUND_TIME_LIMIT, SCATTER_ANGLE, SPREAD, SWIFT_MULT, VELOCITY_MULT,
     circle_hits_rect, clamp, closest_point_on_segment, point_in_rect,
     segment_hits_circle, segments_min_dist_sq,
@@ -33,8 +35,8 @@ from .shared import (
 class Player:
     __slots__ = (
         "pid", "name", "color", "x", "y", "aim", "alive", "waiting",
-        "ammo", "reload_left", "cooldown", "powers", "wins", "kills",
-        "deaths", "inp",
+        "ammo", "reload_left", "reload_total", "cooldown", "powers", "wins",
+        "kills", "deaths", "inp",
     )
 
     def __init__(self, pid, name, color):
@@ -48,6 +50,7 @@ class Player:
         self.waiting = True   # joined mid-round; sits out until the next one
         self.ammo = MAG_SIZE
         self.reload_left = 0.0
+        self.reload_total = RELOAD_TIME
         self.cooldown = 0.0
         self.powers = {}      # powerup name -> expiry timestamp
         self.wins = 0
@@ -68,15 +71,16 @@ class Player:
 
 
 class Bullet:
-    __slots__ = ("x", "y", "vx", "vy", "ttl", "owner")
+    __slots__ = ("x", "y", "vx", "vy", "ttl", "owner", "flags")
 
-    def __init__(self, x, y, vx, vy, owner):
+    def __init__(self, x, y, vx, vy, owner, flags=0):
         self.x = x
         self.y = y
         self.vx = vx
         self.vy = vy
         self.ttl = BULLET_LIFETIME
         self.owner = owner
+        self.flags = flags
 
 
 class LootBox:
@@ -420,27 +424,42 @@ class Game:
 
     # -- weapon ---------------------------------------------------------------
 
+    def _mag_size(self, p):
+        return GOLDEN_MAG if p.has(P_GOLDEN, self.time) else MAG_SIZE
+
+    def _reload_time(self, p):
+        return GOLDEN_RELOAD if p.has(P_GOLDEN, self.time) else RELOAD_TIME
+
+    def _begin_reload(self, p):
+        p.reload_total = self._reload_time(p)
+        p.reload_left = p.reload_total
+
     def _weapon(self, p, dt):
         infinite = p.has(P_AMMO, self.time)
+        mag = self._mag_size(p)
         p.cooldown -= dt
 
         if p.reload_left > 0.0:
             p.reload_left -= dt
             if p.reload_left <= 0.0:
-                p.ammo = MAG_SIZE
+                p.ammo = mag
                 self.events.append({"kind": "reloaded", "pid": p.pid})
             return
 
+        # Picking up or losing the golden gun swaps the magazine underneath you.
+        if p.ammo > mag:
+            p.ammo = mag
+
         if infinite:
-            p.ammo = MAG_SIZE
-        elif p.inp["reload"] and p.ammo < MAG_SIZE:
-            p.reload_left = RELOAD_TIME
+            p.ammo = mag
+        elif p.inp["reload"] and p.ammo < mag:
+            self._begin_reload(p)
             return
 
         if not p.inp["shoot"] or p.cooldown > 0.0:
             return
         if p.ammo <= 0:
-            p.reload_left = RELOAD_TIME
+            self._begin_reload(p)
             return
 
         cd = FIRE_COOLDOWN * (RAPID_MULT if p.has(P_RAPID, self.time) else 1.0)
@@ -449,22 +468,60 @@ class Game:
             p.ammo -= 1
         self._fire(p)
         if p.ammo <= 0 and not infinite:
-            p.reload_left = RELOAD_TIME
+            self._begin_reload(p)
 
     def _fire(self, p):
-        speed = BULLET_SPEED * (
-            VELOCITY_MULT if p.has(P_VELOCITY, self.time) else 1.0)
+        golden = p.has(P_GOLDEN, self.time)
+        homing = p.has(P_HOMING, self.time)
+
+        speed = BULLET_SPEED
+        if golden:
+            speed *= GOLDEN_SPEED_MULT
+        elif p.has(P_VELOCITY, self.time):
+            speed *= VELOCITY_MULT
+
+        flags = (BF_GOLD if golden else 0) | (BF_HOMING if homing else 0)
+        # The golden gun stays a single precise round even under scatter.
         offsets = ((-SCATTER_ANGLE, 0.0, SCATTER_ANGLE)
-                   if p.has(P_SCATTER, self.time) else (0.0,))
+                   if p.has(P_SCATTER, self.time) and not golden else (0.0,))
+        spread = 0.0 if golden else SPREAD
+
         muzzle = PLAYER_RADIUS + BULLET_RADIUS + 2
         for off in offsets:
-            ang = p.aim + off + random.uniform(-SPREAD, SPREAD)
+            ang = p.aim + off + random.uniform(-spread, spread)
             ca, sa = math.cos(ang), math.sin(ang)
             self.bullets.append(Bullet(
                 p.x + ca * muzzle, p.y + sa * muzzle,
-                ca * speed, sa * speed, p.pid))
-        self.events.append({"kind": "shot", "pid": p.pid, "x": p.x, "y": p.y,
-                            "aim": round(p.aim, 3)})
+                ca * speed, sa * speed, p.pid, flags))
+
+        # A muzzle flash would give away an invisible player's exact position;
+        # their bullets are visible, which is tell enough.
+        if not p.has(P_INVIS, self.time):
+            self.events.append({"kind": "shot", "pid": p.pid, "x": p.x,
+                                "y": p.y, "aim": round(p.aim, 3)})
+
+    def _home(self, b, dt):
+        """Curve a homing round towards the nearest valid target."""
+        best, best_d2 = None, HOMING_RANGE * HOMING_RANGE
+        for p in self.players.values():
+            if not p.alive or p.waiting or p.pid == b.owner:
+                continue
+            d2 = (p.x - b.x) ** 2 + (p.y - b.y) ** 2
+            if d2 < best_d2:
+                best, best_d2 = p, d2
+        if best is None:
+            return
+
+        speed = math.hypot(b.vx, b.vy)
+        if speed < 1e-6:
+            return
+        cur = math.atan2(b.vy, b.vx)
+        want = math.atan2(best.y - b.y, best.x - b.x)
+        # Shortest signed angle, then clamp to the per-tick turn budget.
+        diff = (want - cur + math.pi) % math.tau - math.pi
+        limit = HOMING_TURN * dt
+        cur += clamp(diff, -limit, limit)
+        b.vx, b.vy = math.cos(cur) * speed, math.sin(cur) * speed
 
     def _step_bullets(self, dt):
         alive = []
@@ -472,6 +529,9 @@ class Game:
             b.ttl -= dt
             if b.ttl <= 0.0:
                 continue
+
+            if b.flags & BF_HOMING:
+                self._home(b, dt)
 
             x0, y0 = b.x, b.y
             b.x += b.vx * dt
@@ -494,10 +554,8 @@ class Game:
                     victim = p
                     break
 
-            if victim is None:
+            if victim is None or self._resolve_hit(victim, b):
                 alive.append(b)
-            else:
-                self._resolve_hit(victim, b)
         self.bullets = alive
 
     def _bullet_blocked(self, x0, y0, x1, y1):
@@ -512,14 +570,33 @@ class Game:
         return False
 
     def _resolve_hit(self, victim, bullet):
+        """Apply a bullet that reached a player. Returns True if it lives on."""
         shooter = self.players.get(bullet.owner)
 
-        if victim.has(P_SHIELD, self.time):
+        if victim.has(P_REFLECT, self.time):
+            # Parry: send it back the way it came and hand it to the parrier,
+            # so a well-timed reflect is a kill rather than just a save.
+            bullet.vx *= -REFLECT_SPEED_MULT
+            bullet.vy *= -REFLECT_SPEED_MULT
+            bullet.owner = victim.pid
+            bullet.flags |= BF_PARRIED
+            bullet.ttl = max(bullet.ttl, BULLET_LIFETIME * 0.6)
+            # Clear the player it just bounced off, or it re-hits immediately.
+            step = PLAYER_RADIUS + BULLET_RADIUS + 3
+            speed = math.hypot(bullet.vx, bullet.vy) or 1.0
+            bullet.x = victim.x + bullet.vx / speed * step
+            bullet.y = victim.y + bullet.vy / speed * step
+            self.events.append({"kind": "parry", "pid": victim.pid,
+                                "x": victim.x, "y": victim.y})
+            return True
+
+        # The golden gun punches straight through a shield.
+        if victim.has(P_SHIELD, self.time) and not bullet.flags & BF_GOLD:
             # A shield is worth exactly one bullet, then it pops.
             victim.powers.pop(P_SHIELD, None)
             self.events.append({"kind": "shieldbreak", "pid": victim.pid,
                                 "x": bullet.x, "y": bullet.y})
-            return
+            return False
 
         self.events.append({"kind": "spark", "x": bullet.x, "y": bullet.y})
         victim.deaths += 1
@@ -540,6 +617,7 @@ class Game:
         else:
             victim.alive = False
             victim.powers.clear()
+        return False
 
     # -- loot -----------------------------------------------------------------
 
@@ -587,6 +665,10 @@ class Game:
         if kind == P_AMMO:
             p.ammo = MAG_SIZE
             p.reload_left = 0.0
+        elif kind == P_GOLDEN:
+            # Hand over a loaded golden gun rather than whatever was left.
+            p.ammo = GOLDEN_MAG
+            p.reload_left = 0.0
         self.events.append({"kind": "pickup", "pid": p.pid, "power": kind,
                             "name": p.name, "color": p.color,
                             "x": p.x, "y": p.y})
@@ -597,12 +679,42 @@ class Game:
         return [{"id": p.pid, "name": p.name, "color": p.color}
                 for p in self.players.values()]
 
-    def snapshot(self):
+    def anyone_invisible(self):
+        """True if snapshots have to be built per viewer this tick."""
+        now = self.time
+        return any(p.alive and not p.waiting and p.has(P_INVIS, now)
+                   for p in self.players.values())
+
+    def _player_row(self, p, now, viewer):
+        hidden = (viewer != p.pid and p.alive and not p.waiting
+                  and p.has(P_INVIS, now))
+        return [
+            p.pid,
+            # An invisible player's coordinates never leave the server, so no
+            # amount of client tampering can reveal them.
+            0.0 if hidden else round(p.x, 1),
+            0.0 if hidden else round(p.y, 1),
+            0.0 if hidden else round(p.aim, 3),
+            1 if p.alive else 0,
+            p.ammo,
+            (round(p.reload_left / p.reload_total, 2)
+             if p.reload_left > 0 and p.reload_total else 0),
+            p.power_bits(now),
+            p.wins, p.kills, p.deaths,
+            1 if p.waiting else 0,
+            1 if hidden else 0,
+        ]
+
+    def snapshot(self, viewer=None):
         """Compact positional state, sent every tick.
 
         Names live in the roster (they only change on join/leave) and map
         geometry lives in maps.py on both sides, so all that travels here is
         what actually moves.
+
+        `viewer` is the player id this copy is destined for; it only matters
+        while somebody is invisible, and the server skips the per-client build
+        entirely when nobody is.
         """
         now = self.time
         return {
@@ -612,17 +724,10 @@ class Game:
             "pt": round(max(0.0, self.phase_end - now), 2),
             "rd": self.round_no,
             "mi": self.map_index,
-            "p": [[
-                p.pid,
-                round(p.x, 1), round(p.y, 1), round(p.aim, 3),
-                1 if p.alive else 0,
-                p.ammo,
-                round(p.reload_left / RELOAD_TIME, 2) if p.reload_left > 0 else 0,
-                p.power_bits(now),
-                p.wins, p.kills, p.deaths,
-                1 if p.waiting else 0,
-            ] for p in self.players.values()],
-            "b": [[round(b.x, 1), round(b.y, 1), b.owner] for b in self.bullets],
+            "p": [self._player_row(p, now, viewer)
+                  for p in self.players.values()],
+            "b": [[round(b.x, 1), round(b.y, 1), b.owner, b.flags]
+                  for b in self.bullets],
             "l": [[box.bid, round(box.x, 1), round(box.y, 1), box.kind]
                   for box in self.loot],
             # Obstacles are a pure function of the map clock, and clients have

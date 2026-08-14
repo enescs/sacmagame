@@ -175,7 +175,16 @@ class Server:
         next_at = time.perf_counter()
         while True:
             self.game.step(dt)
-            self._broadcast(self.game.snapshot())
+
+            if self.game.anyone_invisible():
+                # Invisible players are filtered out server-side, so each
+                # client needs its own copy. Only pay for that while it matters.
+                for conn in self.conns:
+                    if conn.pid is not None:
+                        conn.send(self.game.snapshot(conn.pid))
+            else:
+                self._broadcast(self.game.snapshot())
+
             if self.game.events:
                 self._broadcast({"t": "ev", "items": self.game.events})
                 self.game.events = []

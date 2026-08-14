@@ -21,17 +21,18 @@ import pygame
 from .maps import MAPS, mover_rect, rotor_segment
 from .net import Discovery, NetClient
 from .shared import (
-    ARENA_H, ARENA_W, BG, BORDER, BOX_RADIUS, BULLET_RADIUS, CHAT_MAX_LEN,
-    CHAT_MAX_LINES, CHAT_SHOW_TIME, DEFAULT_PORT, GRID,
-    HAZARD_EDGE, HAZARD_FILL, HUD_BG, HUD_H, MAG_SIZE, PHASE_COUNTDOWN,
+    ARENA_H, ARENA_W, BF_GOLD, BF_HOMING, BF_PARRIED, BG, BORDER, BOX_RADIUS,
+    BULLET_RADIUS, CHAT_MAX_LEN, CHAT_MAX_LINES, CHAT_SHOW_TIME, DEFAULT_PORT,
+    GRID, HAZARD_EDGE, HAZARD_FILL, HUD_BG, HUD_H, MAG_SIZE, PHASE_COUNTDOWN,
     PHASE_LIVE, PHASE_OVER, PHASE_WAITING, PLAYER_COLORS, PLAYER_RADIUS,
-    POWERUPS, POWERUP_BIT, POWERUP_COLOR, POWERUP_LABEL, P_SHIELD, TEXT,
-    TEXT_DIM, WALL_EDGE, WALL_FILL, WINDOW_H, WINDOW_W,
+    POWERUPS, POWERUP_BIT, POWERUP_COLOR, POWERUP_LABEL, P_GOLDEN, P_HOMING,
+    P_INVIS, P_REFLECT, P_SHIELD, TEXT, TEXT_DIM, WALL_EDGE, WALL_FILL,
+    WINDOW_H, WINDOW_W,
 )
 
 # Snapshot player-row indices, mirroring Game.snapshot().
 P_ID, P_X, P_Y, P_AIM, P_ALIVE, P_AMMO, P_RELOAD, P_BITS = 0, 1, 2, 3, 4, 5, 6, 7
-P_WINS, P_KILLS, P_DEATHS, P_WAIT = 8, 9, 10, 11
+P_WINS, P_KILLS, P_DEATHS, P_WAIT, P_HID = 8, 9, 10, 11, 12
 
 # Debug map cycling. F1/F2 are the advertised pair; PageUp/PageDown are bound
 # too for anyone on a laptop that steals the function row for brightness.
@@ -339,6 +340,13 @@ class App:
                 self.fx.ring(ev["x"], ev["y"], POWERUP_COLOR[P_SHIELD],
                              r0=10, r1=46, life=0.35, width=4)
 
+            elif kind == "parry":
+                col = POWERUP_COLOR[P_REFLECT]
+                self.fx.ring(ev["x"], ev["y"], col, r0=26, r1=8, life=0.3,
+                             width=4)
+                self.fx.burst(ev["x"], ev["y"], col, count=8, speed=210,
+                              life=0.28)
+
             elif kind == "pickup":
                 col = POWERUP_COLOR[ev["power"]]
                 self.fx.ring(ev["x"], ev["y"], col, r0=8, r1=50, life=0.45)
@@ -508,11 +516,21 @@ class App:
         for bid, bx, by, kind in snap["l"]:
             self.draw_box(s, bx, by, kind)
 
-        for bx, by, _owner in snap["b"]:
-            pygame.draw.circle(s, (255, 240, 190), (int(bx), int(by)),
-                               BULLET_RADIUS + 2)
-            pygame.draw.circle(s, (255, 255, 255), (int(bx), int(by)),
-                               BULLET_RADIUS - 1)
+        for bullet in snap["b"]:
+            bx, by = bullet[0], bullet[1]
+            fl = bullet[3] if len(bullet) > 3 else 0
+            if fl & BF_GOLD:
+                outer, inner, rad = POWERUP_COLOR[P_GOLDEN], (255, 250, 225), 2
+            elif fl & BF_HOMING:
+                outer, inner, rad = POWERUP_COLOR[P_HOMING], (255, 235, 250), 1
+            elif fl & BF_PARRIED:
+                outer, inner, rad = POWERUP_COLOR[P_REFLECT], (235, 255, 250), 1
+            else:
+                outer, inner, rad = (255, 240, 190), (255, 255, 255), 0
+            pygame.draw.circle(s, outer, (int(bx), int(by)),
+                               BULLET_RADIUS + 2 + rad)
+            pygame.draw.circle(s, inner, (int(bx), int(by)),
+                               BULLET_RADIUS - 1 + rad)
 
         for row in snap["p"]:
             self.draw_player(s, row)
@@ -531,20 +549,45 @@ class App:
     def draw_player(self, s, row):
         if not row[P_ALIVE] or row[P_WAIT]:
             return
+        # The server blanks the coordinates of players hidden from us, so there
+        # is nothing here to draw even if we wanted to.
+        hidden = len(row) > P_HID and row[P_HID]
+        if hidden:
+            return
 
         info = self.net.roster.get(row[P_ID], {})
         col = PLAYER_COLORS[info.get("color", 0) % len(PLAYER_COLORS)]
         x, y, aim = row[P_X], row[P_Y], row[P_AIM]
         mine = row[P_ID] == self.net.my_id
+        bits = row[P_BITS]
+        now = time.time()
 
-        if row[P_BITS] & POWERUP_BIT[P_SHIELD]:
-            r = PLAYER_RADIUS + 7 + math.sin(time.time() * 6) * 1.5
+        # Your own cloak: drawn faint so you can see it is running.
+        if bits & POWERUP_BIT[P_INVIS]:
+            col = _fade(col, 0.34)
+
+        if bits & POWERUP_BIT[P_SHIELD]:
+            r = PLAYER_RADIUS + 7 + math.sin(now * 6) * 1.5
             pygame.draw.circle(s, POWERUP_COLOR[P_SHIELD], (int(x), int(y)),
                                int(r), 2)
 
-        pygame.draw.line(s, col, (x, y),
-                         (x + math.cos(aim) * (PLAYER_RADIUS + 10),
-                          y + math.sin(aim) * (PLAYER_RADIUS + 10)), 5)
+        # Reflect reads as a spinning guard rather than a solid ring, so it is
+        # never mistaken for a shield.
+        if bits & POWERUP_BIT[P_REFLECT]:
+            spin = now * 4.0
+            for i in range(4):
+                a0 = spin + i * math.pi / 2
+                r = PLAYER_RADIUS + 9
+                pygame.draw.arc(
+                    s, POWERUP_COLOR[P_REFLECT],
+                    (int(x - r), int(y - r), int(r * 2), int(r * 2)),
+                    a0, a0 + 0.55, 3)
+
+        barrel = POWERUP_COLOR[P_GOLDEN] if bits & POWERUP_BIT[P_GOLDEN] else col
+        width = 7 if bits & POWERUP_BIT[P_GOLDEN] else 5
+        pygame.draw.line(s, barrel, (x, y),
+                         (x + math.cos(aim) * (PLAYER_RADIUS + 12),
+                          y + math.sin(aim) * (PLAYER_RADIUS + 12)), width)
         pygame.draw.circle(s, col, (int(x), int(y)), PLAYER_RADIUS)
         pygame.draw.circle(s, (255, 255, 255) if mine else (22, 24, 32),
                            (int(x), int(y)), PLAYER_RADIUS, 2 if mine else 1)
@@ -646,6 +689,13 @@ class App:
                 pygame.draw.rect(c, (44, 48, 64), (20, top + 30, 120, 12))
                 pygame.draw.rect(c, (255, 199, 119), (20, top + 30, width, 12))
                 _text(c, self.f_small, "reloading", (150, top + 28), TEXT_DIM)
+            elif me[P_BITS] & POWERUP_BIT[P_GOLDEN]:
+                # The golden gun holds one round, so show one wide pip rather
+                # than six mostly-empty ones.
+                gold = POWERUP_COLOR[P_GOLDEN]
+                pygame.draw.rect(c, gold if me[P_AMMO] > 0 else (44, 48, 64),
+                                 (20, top + 30, 74, 12))
+                _text(c, self.f_small, "golden round", (102, top + 28), gold)
             else:
                 for i in range(MAG_SIZE):
                     filled = i < me[P_AMMO]
@@ -659,6 +709,8 @@ class App:
                     continue
                 label = self.f_small.render(POWERUP_LABEL[name], True,
                                             POWERUP_COLOR[name])
+                if x + label.get_width() > 400:
+                    break  # keep clear of the round status in the middle
                 pygame.draw.rect(c, (30, 33, 46),
                                  (x - 4, top + 52, label.get_width() + 8, 20),
                                  border_radius=3)
