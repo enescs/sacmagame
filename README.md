@@ -144,6 +144,18 @@ sliding blocks and rotors — if you want to add one.
   a normal network, or a phone hotspot.
 - **Discovery finds nothing but you know the IP.** Press `M` and type it. The
   host prints its addresses on startup.
+- **They see someone else's game but not yours.** Then discovery works fine and
+  you are simply on a different subnet — typically you on ethernet, them on
+  wifi. Broadcasts stop at that line; routed TCP usually does not, so `M` plus
+  your IP still gets them in. To put yourself back in their list, beacon to
+  their subnet directly:
+
+  ```
+  ./host.sh --name "Office FFA" --announce 10.166.120.0/24
+  ```
+
+  `--announce` takes plain IPs too, comma-separated. Compare the first three
+  numbers of your IP against theirs to see whether this is your problem.
 
 ## How it works
 

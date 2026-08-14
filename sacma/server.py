@@ -13,6 +13,7 @@ games instead of asking everyone for an IP address.
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import socket
 import sys
@@ -57,10 +58,11 @@ class Conn:
 
 
 class Server:
-    def __init__(self, port, name, debug=True):
+    def __init__(self, port, name, debug=True, announce=()):
         self.port = port
         self.name = name
         self.debug = debug
+        self.announce = tuple(announce)
         self.game = Game()
         self.conns = set()
 
@@ -215,7 +217,10 @@ class Server:
             }).encode()
             # 127.0.0.1 as well, so a client on this same machine always sees
             # the game even if the OS declines to loop the broadcast back.
-            for host in ("255.255.255.255", "127.0.0.1"):
+            # --announce targets get the beacon by unicast: on an office
+            # network the players are often on a different subnet (wifi vs
+            # wired), and no router forwards a broadcast across that line.
+            for host in ("255.255.255.255", "127.0.0.1") + self.announce:
                 try:
                     sock.sendto(payload, (host, DISCOVERY_PORT))
                 except OSError:
@@ -227,7 +232,11 @@ class Server:
         for ip in local_ips():
             print(f"   friends connect to:  {ip}:{self.port}")
         print(f"   (or just hit Scan in the client -- '{self.name}' is "
-              f"broadcasting on this network)\n")
+              f"broadcasting on this network)")
+        if self.announce:
+            print(f"   also announcing to {len(self.announce)} address(es) "
+                  f"off this subnet")
+        print()
         async with server:
             await asyncio.gather(server.serve_forever(),
                                  self.game_loop(), self.beacon())
@@ -254,11 +263,45 @@ def local_ips():
     return found or ["127.0.0.1"]
 
 
+def expand_targets(spec, limit=1024):
+    """Turn an --announce string into a flat tuple of addresses to beacon to.
+
+    Accepts plain IPs and CIDR subnets; a subnet becomes every host address in
+    it, because the point of the flag is reaching players whose IPs you do not
+    know. Capped so a fat-fingered /8 cannot turn the beacon into a flood.
+    """
+    targets = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "/" in part:
+            try:
+                net = ipaddress.ip_network(part, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"--announce: {exc}")
+            hosts = list(net.hosts()) or [net.network_address]
+            if len(hosts) > limit:
+                raise ValueError(f"--announce: {part} covers {len(hosts)} "
+                                 f"addresses, over the {limit} cap -- use a "
+                                 f"smaller subnet")
+            targets.extend(str(h) for h in hosts)
+        else:
+            targets.append(part)
+    # Dedupe, keeping the order the host typed.
+    return tuple(dict.fromkeys(targets))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Host a sacmagame LAN match.")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--name", default=None,
                     help="Name shown in the client's server list.")
+    ap.add_argument("--announce", default="",
+                    help="Comma-separated addresses to beacon directly, for "
+                         "players a broadcast cannot reach (different wifi "
+                         "subnet, AP client isolation). Takes plain IPs and "
+                         "whole subnets: --announce 10.166.120.0/24")
     ap.add_argument("--no-debug", action="store_true",
                     help="Stop clients cycling maps with [ and ]. Worth "
                          "setting once people are actually competing.")
@@ -272,11 +315,15 @@ def main():
 
     name = args.name or f"{socket.gethostname()}'s game"
     debug = not args.no_debug
+    try:
+        announce = expand_targets(args.announce)
+    except ValueError as exc:
+        ap.error(str(exc))
     print(f"\n== sacmagame server '{name}' on port {args.port} ==")
     if debug:
         print("   debug map cycling is ON -- any player can press [ or ]")
     try:
-        asyncio.run(Server(args.port, name, debug).run())
+        asyncio.run(Server(args.port, name, debug, announce).run())
     except KeyboardInterrupt:
         print("\nserver stopped.")
 
