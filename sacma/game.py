@@ -771,7 +771,10 @@ class Game:
 
             if can_act and not frozen:
                 self._move_player(p, dt)
-                self._weapon(p, dt)
+                # A time stop buys you position, not free shots: the holder
+                # walks while the arena waits, but their weapon waits too.
+                if not held:
+                    self._weapon(p, dt)
             self._push_out(p)
 
         self._step_bullets(dt, held)
@@ -1046,10 +1049,10 @@ class Game:
     def _step_bullets(self, dt, held=False):
         alive = []
         for b in self.bullets:
-            # During a time stop everything already in the air hangs there --
-            # its fuse stops too -- while the holder's own shots fly as normal,
-            # which is the whole point of stopping time.
-            if held and b.owner != self.hold_pid:
+            # During a time stop every bullet hangs where it is -- its fuse
+            # stops too. The holder gets to walk through the frozen arena, not
+            # to fight in it, so their own shots are pinned as well.
+            if held:
                 alive.append(b)
                 continue
 
