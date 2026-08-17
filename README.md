@@ -131,6 +131,17 @@ a bigger body, 1.22x speed, roughly double the fire rate, a 14-round magazine
 and a quicker reload. The size cuts both ways — they're easier to hit, and they
 fit through less.
 
+**The boss can't pick up loot.** Crates are the hunters' side of the bargain —
+the boss walks over one without taking it or spoiling it, so it can't park on
+the drop zone and deny the mob the only thing evening the odds.
+
+**Nobody starts next to the boss.** It takes a spawn first and the hunters fill
+the stands farthest from it, so the round opens with everyone converging rather
+than with whoever spawned back-to-back with it already dead. With a small group
+that's 600–1000px of daylight; in a full eight-player lobby every stand is
+used, so the boss takes the most isolated one and the nearest hunter is 556px
+away instead of 252px.
+
 Everyone else is on the same side for the round: **hunters can't shoot each
 other**, bullets pass straight through teammates. Kill the boss and every
 hunter gets the round win, including the ones who died drawing fire, because
@@ -183,7 +194,7 @@ grabbing one usually means giving up your cover. Touch it to pick it up.
 | **Sprint** | 1.45x move speed for 10s |
 | **Scatter** | three bullets per shot for 10s |
 | **Invisible** | 3s — nobody can see you, but your bullets still show |
-| **Golden gun** | 5s — one round in the mag, slow reload, very fast, ignores shields |
+| **Golden gun** | 5s — one round in the mag, 1.5s reload, very fast, ignores shields |
 | **Reflect** | 5s — parries incoming bullets straight back, and they become yours |
 | **Homing** | 5s — your bullets curve into whoever is nearest |
 | **Ricochet** | 8s — your bullets bounce off walls up to 3 times, and never hit you |

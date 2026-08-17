@@ -33,7 +33,7 @@ from .shared import (
     BOSS_FIRE_MULT, BOSS_HP_BASE, BOSS_HP_MAX, BOSS_HP_PER_FOE, BOSS_MAG,
     BOSS_MIN_PLAYERS, BOSS_RADIUS, BOSS_RELOAD, BOSS_SPEED_MULT, BOUNCE_DAMP,
     BOUNCE_LIFETIME, BOUNCE_MAX, BOX_RADIUS, BULLET_LIFETIME, BULLET_RADIUS,
-    BULLET_SPEED, CHAT_MAX_LEN, COUNTDOWN_TIME, CTF_CAPTURES_TO_WIN,
+    BULLET_SPEED, BULLET_STEP, CHAT_MAX_LEN, COUNTDOWN_TIME, CTF_CAPTURES_TO_WIN,
     CTF_RESPAWN_TIME, CTF_ROUND_TIME, CTF_TEAM_SIZE, FIRE_COOLDOWN,
     FLAG_CARRIED, FLAG_CARRY_MULT, FLAG_DROPPED, FLAG_HOME, FLAG_RADIUS,
     FLAG_RETURN_TIME, FROST_MAX, FROST_RADIUS, FROST_SLOW, FROST_TIME,
@@ -481,6 +481,44 @@ class Game:
         self.boss_pid = boss.pid
         self.last_boss = boss.pid
 
+    def _spawn_boss_round(self, points):
+        """Put the boss down first, then the mob as far from it as the map allows.
+
+        Spawning a hunter next to the boss is a coin flip on who is looking the
+        right way, and the round is meant to start with everyone converging on
+        it rather than one person already dead. The boss takes a random stand
+        and the hunters fill the remaining ones farthest-first, so the player
+        who draws the short straw is only close when there are more players
+        than distant spawns.
+        """
+        boss = self.players[self.boss_pid]
+        # Stands that will still be empty once everyone is placed.
+        spare = len(points) - 1 - (len(self.players) - 1)
+        if spare <= 1 and len(points) > 1:
+            # A full-ish lobby uses every stand, so no amount of ordering buys
+            # the hunters room -- the only lever left is which the boss takes.
+            # Give it the most isolated stand (on these maps the middle of a
+            # long edge, 556px from its neighbour rather than 276px), picking
+            # at random between ties so it is not the same spot every time.
+            def loneliness(q):
+                return min((q[0] - r[0]) ** 2 + (q[1] - r[1]) ** 2
+                           for r in points if r != q)
+            best = max(loneliness(q) for q in points)
+            bx, by = random.choice([q for q in points
+                                    if loneliness(q) >= best * 0.99])
+            points.remove((bx, by))
+        else:
+            bx, by = points.pop() if points else (ARENA_W / 2, ARENA_H / 2)
+        self._place(boss, bx, by)
+        self._reset_player(boss)
+
+        # _spawn pops from the end, so nearest-first ordering hands out the
+        # farthest point first.
+        points.sort(key=lambda q: (q[0] - bx) ** 2 + (q[1] - by) ** 2)
+        for p in self.players.values():
+            if p.pid != boss.pid:
+                self._spawn(p, points)
+
     def _reset_flags(self):
         bases = self.map["bases"]
         self.flags = [Flag(t, bases[t][0], bases[t][1]) for t in range(2)]
@@ -517,8 +555,11 @@ class Game:
         else:
             self._maybe_pick_boss()
             points = self._spawn_points()
-            for p in self.players.values():
-                self._spawn(p, points)
+            if self.boss_pid is not None:
+                self._spawn_boss_round(points)
+            else:
+                for p in self.players.values():
+                    self._spawn(p, points)
 
         self.phase = PHASE_COUNTDOWN
         self.phase_end = self.time + COUNTDOWN_TIME
@@ -1027,7 +1068,12 @@ class Game:
             # A ghost round only reports blocked at the arena border, so the
             # two powerups compose: it passes through the map and, if it is
             # also a ricochet, rebounds off the edge instead of dying there.
-            if self._bullet_blocked(x0, y0, b.x, b.y, b.flags):
+            impact = self._bullet_blocked(x0, y0, b.x, b.y, b.flags)
+            if impact:
+                # Rewind to where it actually met the wall. A fast round would
+                # otherwise spark, ice over or bounce from a point well past
+                # the surface it hit.
+                b.x, b.y = impact
                 if not self._bounce(b, x0, y0):
                     self.events.append({"kind": "spark", "x": b.x, "y": b.y})
                     self._drop_frost(b, x0, y0)
@@ -1054,19 +1100,38 @@ class Game:
         self.bullets = alive
 
     def _bullet_blocked(self, x0, y0, x1, y1, flags=0):
+        """Where this step meets solid geometry, or None if it flies clear.
+
+        Returns the impact point rather than a bare yes/no so the caller can
+        rewind the round to it: a ricochet has to reflect off the face it
+        actually hit, not off wherever the full step happened to end up.
+
+        Rectangles are sampled along the step in BULLET_STEP hops. Testing
+        only the endpoint is what let a golden round -- 40px per tick against
+        a 24px wall -- pass straight through cover. Rotor bars need no
+        sampling: that test is already segment-against-capsule, and exact.
+        """
+        # A ghost round ignores the map, but not the edge of it -- letting
+        # them leave would just be a shot that quietly never existed.
+        rects = BORDER if flags & BF_GHOST else self.rects
+
+        dx, dy = x1 - x0, y1 - y0
+        hops = int(math.hypot(dx, dy) / BULLET_STEP) + 1
+        for i in range(1, hops + 1):
+            t = i / hops
+            px, py = x0 + dx * t, y0 + dy * t
+            for rect in rects:
+                if point_in_rect(px, py, rect):
+                    return px, py
+
         if flags & BF_GHOST:
-            # A ghost round ignores the map, but not the edge of it -- letting
-            # them leave would just be a shot that quietly never existed.
-            return any(point_in_rect(x1, y1, rect) for rect in BORDER)
-        for rect in self.rects:
-            if point_in_rect(x1, y1, rect):
-                return True
+            return None
         for bx0, by0, bx1, by1, rad in self.bars:
             reach = rad + BULLET_RADIUS
             if segments_min_dist_sq(x0, y0, x1, y1,
                                     bx0, by0, bx1, by1) <= reach * reach:
-                return True
-        return False
+                return x1, y1
+        return None
 
     def _bounce(self, b, x0, y0):
         """Reflect a ricochet round off whatever it just hit.
@@ -1218,6 +1283,12 @@ class Game:
         for box in list(self.loot):
             for p in self.players.values():
                 if not p.alive or p.waiting:
+                    continue
+                # The boss already is the powerup. Crates are the hunters'
+                # side of the bargain, and it walks straight over them without
+                # taking or spoiling one -- a boss that could park on the drop
+                # zone would deny the mob the only thing evening the odds.
+                if p.boss:
                     continue
                 if ((p.x - box.x) ** 2 + (p.y - box.y) ** 2
                         <= (p.radius + BOX_RADIUS) ** 2):

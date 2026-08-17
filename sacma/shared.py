@@ -130,6 +130,11 @@ TEAM_NAMES = ["BLUE", "RED"]
 BULLET_RADIUS = 3
 BULLET_SPEED = 760.0  # px/s
 BULLET_LIFETIME = 1.4  # seconds
+# A tick's flight is checked against the map in hops no longer than this. The
+# thinnest wall in the game is 24px and the border is 16px, while a golden
+# round covers 40px in a tick -- testing only where the round landed lets the
+# fast ones step clean over cover.
+BULLET_STEP = 8.0
 FIRE_COOLDOWN = 0.26   # hold to fire, ~4 shots/s
 MAG_SIZE = 6
 RELOAD_TIME = 1.5
@@ -235,8 +240,11 @@ SCATTER_ANGLE = 0.13    # radians between scatter pellets
 # Golden gun: one shot in the magazine, slow to reload, but the round is fast
 # and goes straight through a shield. Overrides scatter -- it stays a rifle.
 GOLDEN_MAG = 1
-GOLDEN_RELOAD = 2.2
-GOLDEN_SPEED_MULT = 2.6
+# Reload is half again as quick as it was (2.2s / 1.5), so the one round in the
+# magazine comes back fast enough that a miss is a setback rather than the end
+# of the powerup.
+GOLDEN_RELOAD = 1.47
+GOLDEN_SPEED_MULT = 3.2
 
 # Reflect: a parried round is sent back the way it came, and now belongs to
 # whoever parried it, so a good parry is a kill.
@@ -270,8 +278,12 @@ GHOST_SPEED_MULT = 0.85  # slower, so the shot through a wall is still a read
 # Deliberately gentle: enough to put a shot off, not enough to be unplayable
 # or to make anybody feel ill.
 QUAKE_TIME = 3.0
-QUAKE_AMPLITUDE = 9.0   # px of window travel at the start, decaying to zero
-QUAKE_FREQ = 11.0       # rad/s of the base wobble
+# Amplitude is what "stronger" means here -- it is the distance the window
+# actually moves, and so directly how far a shot drifts. Frequency comes down
+# a little as it goes up: a big fast wobble is a nauseating buzz, while a big
+# slower one reads as ground moving, which is the idea.
+QUAKE_AMPLITUDE = 20.0  # px of window travel at the start, decaying to zero
+QUAKE_FREQ = 9.0        # rad/s of the base wobble
 
 # Bullet flags, so clients can draw special rounds differently.
 BF_GOLD = 1
