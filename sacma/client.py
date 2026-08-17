@@ -39,7 +39,10 @@ from .shared import (
 P_ID, P_X, P_Y, P_AIM, P_ALIVE, P_AMMO, P_RELOAD, P_BITS = 0, 1, 2, 3, 4, 5, 6, 7
 P_WINS, P_KILLS, P_DEATHS, P_WAIT, P_HID = 8, 9, 10, 11, 12
 P_TEAM, P_BOSS, P_HP, P_HPMAX, P_RESP = 13, 14, 15, 16, 17
+P_PLEFT = 18  # {powerup: fraction of its duration left}, own row only
 
+
+POWER_PANEL_W = 200  # the live-powerup readout in the arena's top right corner
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "assets", "powerups")
 ICON_SIZE = 20  # 16x16 art, drawn slightly enlarged to fill the crate
@@ -257,14 +260,19 @@ class App:
         pygame.display.set_caption("sacmagame")
 
         info = pygame.display.Info()
-        self.scale = min(1.0,
-                         (info.current_w - 40) / WINDOW_W,
-                         (info.current_h - 100) / WINDOW_H)
-        self.win_size = (int(WINDOW_W * self.scale), int(WINDOW_H * self.scale))
-        self.screen = pygame.display.set_mode(self.win_size)
+        self.desktop_size = (info.current_w, info.current_h)
+        self.windowed_scale = min(1.0,
+                                  (info.current_w - 40) / WINDOW_W,
+                                  (info.current_h - 100) / WINDOW_H)
+        self.fullscreen = False
         self.canvas = pygame.Surface((WINDOW_W, WINDOW_H))
-        # Only used while an earthquake is shaking a scaled-down window.
-        self.scaled = pygame.Surface(self.win_size)
+        self.scale = 1.0
+        self.win_size = (WINDOW_W, WINDOW_H)
+        # Where the scaled frame sits in the window: (0, 0) windowed, and the
+        # letterbox margin in fullscreen, where the screen is a different shape.
+        self.origin = (0, 0)
+        self.scaled = None
+        self._apply_video_mode()
         self.clock = pygame.time.Clock()
 
         self.f_small = pygame.font.Font(None, 20)
@@ -299,6 +307,33 @@ class App:
 
         self.port = port
         self.last_ping = 0.0
+
+    # -- video mode -----------------------------------------------------------
+
+    def _apply_video_mode(self):
+        """(Re)open the display for the current windowed/fullscreen choice."""
+        if self.fullscreen:
+            self.screen = pygame.display.set_mode(self.desktop_size,
+                                                  pygame.FULLSCREEN)
+            w, h = self.screen.get_size()
+            # Fit the frame inside the screen without distorting it; whatever
+            # is left over becomes a black border.
+            self.scale = min(w / WINDOW_W, h / WINDOW_H)
+        else:
+            self.scale = self.windowed_scale
+            w = int(WINDOW_W * self.scale)
+            h = int(WINDOW_H * self.scale)
+            self.screen = pygame.display.set_mode((w, h))
+        self.win_size = (int(WINDOW_W * self.scale), int(WINDOW_H * self.scale))
+        self.origin = ((w - self.win_size[0]) // 2, (h - self.win_size[1]) // 2)
+        self.scaled = pygame.Surface(self.win_size)
+
+    def toggle_fullscreen(self):
+        self.fullscreen = not self.fullscreen
+        # Nothing to move a fullscreen window to, so quakes shake the frame
+        # inside it instead. Leaving fullscreen re-probes the window manager.
+        self.shake.can_move = False if self.fullscreen else None
+        self._apply_video_mode()
 
     # -- connection -----------------------------------------------------------
 
@@ -344,10 +379,12 @@ class App:
 
             # The fallback path for desktops that will not let us move the
             # window: shift the frame inside it instead, on the same numbers.
-            at = self.shake.offset
+            ox, oy = self.origin
+            sx, sy = self.shake.offset
+            at = (ox + sx, oy + sy)
             if at != (0, 0):
                 self.screen.fill((0, 0, 0))
-            if self.scale == 1.0:
+            if self.win_size == (WINDOW_W, WINDOW_H):
                 self.screen.blit(self.canvas, at)
             elif at == (0, 0):
                 pygame.transform.smoothscale(self.canvas, self.win_size,
@@ -364,13 +401,20 @@ class App:
 
     def mouse_canvas(self):
         mx, my = pygame.mouse.get_pos()
-        return mx / self.scale, my / self.scale
+        return ((mx - self.origin[0]) / self.scale,
+                (my - self.origin[1]) / self.scale)
 
     def handle_events(self):
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 return False
             if ev.type != pygame.KEYDOWN:
+                continue
+
+            if ev.key == pygame.K_F11:
+                # Checked ahead of everything else so it works while typing or
+                # with the mode picker up.
+                self.toggle_fullscreen()
                 continue
 
             if self.typing:
@@ -801,7 +845,7 @@ class App:
         arena = c.subsurface((0, 0, ARENA_W, ARENA_H))
         self.draw_arena(arena, snap)
         self.fx.draw(arena)
-        self.draw_feed(arena)
+        self.draw_feed(arena, self.draw_power_timers(arena, snap))
         self.draw_overlay(arena, snap)
         self.draw_pending_mode(arena, snap)
         self.draw_chat(arena)
@@ -1176,8 +1220,48 @@ class App:
             rect = (left + i * (seg + gap), int(y) - 6, seg, 6)
             pygame.draw.rect(s, BOSS_COLOR if i < hp else (52, 40, 44), rect)
 
-    def draw_feed(self, s):
-        y = 26
+    def draw_power_timers(self, s, snap):
+        """Every live powerup in the arena, top right, each draining to empty.
+
+        Deliberately not tucked into your own corner of the HUD: knowing how
+        much longer somebody else's time stop or golden gun has to run is
+        exactly what the rest of the room needs to see. Returns the y the kill
+        feed should start at, so the two never overlap.
+        """
+        rows = []
+        for r in snap["p"]:
+            left = r[P_PLEFT] if len(r) > P_PLEFT else {}
+            if not left or r[P_WAIT] or not r[P_ALIVE]:
+                continue
+            who = self.net.roster.get(r[P_ID], {}).get("name", "?")[:10]
+            for name in POWERUPS:
+                frac = left.get(name)
+                if frac:
+                    rows.append((who, name, max(0.0, min(1.0, float(frac)))))
+        if not rows:
+            return 26
+
+        rows = rows[:6]
+        x = ARENA_W - POWER_PANEL_W - 26
+        h = len(rows) * 26 + 12
+        plate = pygame.Surface((POWER_PANEL_W, h), pygame.SRCALPHA)
+        plate.fill((18, 20, 30, 170))
+        s.blit(plate, (x, 26))
+
+        y = 34
+        bar_w = POWER_PANEL_W - 16
+        for who, name, frac in rows:
+            col = POWERUP_COLOR[name]
+            _text(s, self.f_small, f"{who} · {POWERUP_LABEL[name]}",
+                  (x + 8, y), col)
+            pygame.draw.rect(s, (44, 48, 64), (x + 8, y + 16, bar_w, 4))
+            pygame.draw.rect(s, col,
+                             (x + 8, y + 16, max(1, int(bar_w * frac)), 4))
+            y += 26
+        return 26 + h + 8
+
+    def draw_feed(self, s, top=26):
+        y = top
         for surf, _exp in self.feed:
             s.blit(surf, (ARENA_W - surf.get_width() - 26, y))
             y += 22
@@ -1371,7 +1455,7 @@ class App:
         _centered(c, self.f_small, sub, (mid_x, top + 38), TEXT_DIM)
         _centered(c, self.f_small,
                   f"{int(self.net.ping_ms)}ms   [T] chat   [M] mode   "
-                  f"[Esc] leave   [F1/F2] map",
+                  f"[Esc] leave   [F1/F2] map   [F11] fullscreen",
                   (mid_x, top + 62), TEXT_DIM)
 
 

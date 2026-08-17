@@ -1484,6 +1484,12 @@ class Game:
             # Seconds until they are back, for the client's respawn clock.
             (round(max(0.0, p.respawn_at - now), 1)
              if not p.alive and p.respawn_at > 0.0 else 0),
+            # How much of each active powerup is left, 1.0 down to 0.0, so the
+            # HUD can drain a bar. Sent for everyone, not just the viewer: the
+            # point of the readout is that the room can see how long they have
+            # to wait out somebody else's powerup.
+            {name: round(max(0.0, exp - now) / POWERUP_DURATION[name], 3)
+             for name, exp in p.powers.items() if exp > now},
         ]
 
     def snapshot(self, viewer=None):
