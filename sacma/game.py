@@ -10,6 +10,17 @@ Round flow: with two or more players connected we cycle
 COUNTDOWN -> LIVE -> OVER -> COUNTDOWN on a fresh map. One bullet kills, so a
 round ends the moment a single player is left standing. Alone on the server you
 sit in WAITING, which is a free-roam practice mode with instant respawns.
+
+Two things bend that shape. Roughly one free-for-all round in seven is a boss
+round: somebody is picked, given a health bar and better numbers, and everyone
+else stops shooting each other until it is dealt with. And the server can be
+in capture-the-flag mode instead, where the round runs on captures and a
+respawn timer rather than on who is still breathing. Players pick the mode
+from inside the game; a change lands at the next round.
+
+Two powerups also reach outside a single player: a time stop freezes the whole
+arena except whoever picked it up, and frost leaves ice on the floor that
+slows everyone but the side that laid it.
 """
 
 import math
@@ -17,20 +28,27 @@ import random
 
 from .maps import MAPS, mover_rect, rotor_segment
 from .shared import (
-    ARENA_H, ARENA_W, BF_BOUNCE, BF_FROST, BF_GOLD, BF_HOMING, BF_PARRIED,
-    BORDER, BOUNCE_DAMP, BOUNCE_LIFETIME, BOUNCE_MAX, BOX_RADIUS,
-    BULLET_LIFETIME, BULLET_RADIUS, BULLET_SPEED, CHAT_MAX_LEN, COUNTDOWN_TIME,
-    FIRE_COOLDOWN, FROST_MAX, FROST_RADIUS, FROST_SLOW, FROST_TIME,
-    GOLDEN_MAG, GOLDEN_RELOAD, GOLDEN_SPEED_MULT, HOLD_TIME, HOMING_RANGE,
-    HOMING_TURN, LOOT_FIRST_DROP, LOOT_INTERVAL, LOOT_JITTER,
+    ARENA_H, ARENA_W, BASE_RADIUS, BF_BOUNCE, BF_FROST, BF_GHOST, BF_GOLD,
+    BF_HOMING, BF_PARRIED, BORDER, BOSS_BULLET_MULT, BOSS_CHANCE,
+    BOSS_FIRE_MULT, BOSS_HP_BASE, BOSS_HP_MAX, BOSS_HP_PER_FOE, BOSS_MAG,
+    BOSS_MIN_PLAYERS, BOSS_RADIUS, BOSS_RELOAD, BOSS_SPEED_MULT, BOUNCE_DAMP,
+    BOUNCE_LIFETIME, BOUNCE_MAX, BOX_RADIUS, BULLET_LIFETIME, BULLET_RADIUS,
+    BULLET_SPEED, CHAT_MAX_LEN, COUNTDOWN_TIME, CTF_CAPTURES_TO_WIN,
+    CTF_RESPAWN_TIME, CTF_ROUND_TIME, CTF_TEAM_SIZE, FIRE_COOLDOWN,
+    FLAG_CARRIED, FLAG_CARRY_MULT, FLAG_DROPPED, FLAG_HOME, FLAG_RADIUS,
+    FLAG_RETURN_TIME, FROST_MAX, FROST_RADIUS, FROST_SLOW, FROST_TIME,
+    GHOST_SPEED_MULT, GOLDEN_MAG, GOLDEN_RELOAD, GOLDEN_SPEED_MULT, HOLD_TIME,
+    HOMING_RANGE, HOMING_TURN, LOOT_FIRST_DROP, LOOT_INTERVAL, LOOT_JITTER,
     LOOT_MAX_ON_FIELD, LOOT_SPREAD_X, LOOT_SPREAD_Y, MAG_SIZE, MAX_PLAYERS,
-    PHASE_COUNTDOWN, PHASE_LIVE, PHASE_OVER, PHASE_WAITING, PLAYER_RADIUS,
-    PLAYER_SPEED, POWERUPS, POWERUP_BIT, POWERUP_DURATION, P_AMMO, P_BOUNCE,
-    P_FROST, P_GOLDEN, P_HOLD, P_HOMING, P_INVIS, P_RAPID, P_REFLECT, P_SCATTER,
-    P_SHIELD, P_SWIFT, P_VELOCITY, RAPID_MULT, REFLECT_SPEED_MULT, RELOAD_TIME, ROUND_OVER_TIME,
-    ROUND_TIME_LIMIT, SCATTER_ANGLE, SPREAD, SWIFT_MULT, VELOCITY_MULT,
-    circle_hits_rect, clamp, closest_point_on_segment, point_in_rect,
-    segment_hits_circle, segments_min_dist_sq,
+    MODE_BOSS, MODE_CTF, MODE_FFA, MODE_LABEL, PHASE_COUNTDOWN, PHASE_LIVE,
+    PHASE_OVER, PHASE_WAITING, PLAYER_RADIUS, PLAYER_SPEED, POWERUPS,
+    POWERUP_BIT, POWERUP_DURATION, P_AMMO, P_BOUNCE, P_FROST, P_GHOST,
+    P_GOLDEN, P_HOLD, P_HOMING, P_INVIS, P_QUAKE, P_RAPID, P_REFLECT,
+    P_SCATTER, P_SHIELD, P_SWIFT, P_VELOCITY, RAPID_MULT, REFLECT_SPEED_MULT,
+    RELOAD_TIME, ROUND_OVER_TIME, ROUND_TIME_LIMIT, SCATTER_ANGLE, SPREAD,
+    SWIFT_MULT, TEAM_NAMES, VELOCITY_MULT, circle_hits_rect, clamp,
+    closest_point_on_segment, point_in_rect, segment_hits_circle,
+    segments_min_dist_sq,
 )
 
 
@@ -38,7 +56,7 @@ class Player:
     __slots__ = (
         "pid", "name", "color", "x", "y", "aim", "alive", "waiting",
         "ammo", "reload_left", "reload_total", "cooldown", "powers", "wins",
-        "kills", "deaths", "inp",
+        "kills", "deaths", "inp", "team", "boss", "hp", "hp_max", "respawn_at",
     )
 
     def __init__(self, pid, name, color):
@@ -60,6 +78,17 @@ class Player:
         self.deaths = 0
         self.inp = {"up": False, "down": False, "left": False, "right": False,
                     "shoot": False, "reload": False, "aim": 0.0}
+
+        self.team = -1        # capture the flag only; -1 means no team
+        self.boss = False
+        # Everybody but a boss dies to one bullet, so this is 1 almost always.
+        self.hp = 1
+        self.hp_max = 1
+        self.respawn_at = 0.0
+
+    @property
+    def radius(self):
+        return BOSS_RADIUS if self.boss else PLAYER_RADIUS
 
     def has(self, power, now):
         return self.powers.get(power, 0.0) > now
@@ -108,8 +137,42 @@ class LootBox:
         self.kind = kind
 
 
+class Flag:
+    """One team's flag: sitting on its stand, on somebody's back, or on the floor."""
+
+    __slots__ = ("team", "home_x", "home_y", "x", "y", "carrier", "return_at",
+                 "at_home")
+
+    def __init__(self, team, home_x, home_y):
+        self.team = team
+        self.home_x = float(home_x)
+        self.home_y = float(home_y)
+        self.x = self.home_x
+        self.y = self.home_y
+        self.carrier = None    # pid of whoever is running it
+        self.return_at = 0.0   # when a dropped flag goes home by itself
+        # Tracked rather than inferred from the coordinates: a carrier shot
+        # dead standing on their own stand drops the flag exactly on it, and
+        # that is a flag on the floor, not a flag that is home.
+        self.at_home = True
+
+    @property
+    def state(self):
+        if self.carrier is not None:
+            return FLAG_CARRIED
+        return FLAG_HOME if self.at_home else FLAG_DROPPED
+
+    def send_home(self):
+        self.carrier = None
+        self.x, self.y = self.home_x, self.home_y
+        self.return_at = 0.0
+        self.at_home = True
+
+
 class Game:
-    def __init__(self):
+    def __init__(self, mode=MODE_FFA):
+        self.mode = mode
+        self.next_mode = None   # queued by a player; lands at the next round
         self.players = {}
         self.bullets = []
         self.frost = []
@@ -128,16 +191,104 @@ class Game:
         self.hold_until = 0.0  # arena is frozen for everyone but hold_pid
         self.hold_pid = 0
 
+        # Boss rounds (free-for-all) and flags (capture the flag) are both
+        # per-round state; only one of them is ever in use on a given server.
+        self.boss_pid = None
+        self.last_boss = None  # so the same player is not picked twice running
+        self.flags = []
+        self.team_score = [0, 0]
+        self._nocap_at = {}
+        # Set when team assignments change under the server's feet, so it knows
+        # to push a fresh roster.
+        self.roster_dirty = False
+
         self._next_pid = 1
         self._next_bid = 1
         self.rects = []
         self.bars = []
         self._rebuild_geometry()
 
+    @property
+    def ctf(self):
+        return self.mode == MODE_CTF
+
+    @staticmethod
+    def mode_cap(mode):
+        return CTF_TEAM_SIZE * 2 if mode == MODE_CTF else MAX_PLAYERS
+
+    @property
+    def max_players(self):
+        # If a switch to capture the flag is already queued, hold the roster at
+        # four now -- filling the seventh seat and then having to throw three
+        # people out when the round turns over would be worse.
+        cap = self.mode_cap(self.mode)
+        if self.next_mode is not None:
+            cap = min(cap, self.mode_cap(self.next_mode))
+        return cap
+
+    # -- game modes -----------------------------------------------------------
+
+    def request_mode(self, mode, by_name=""):
+        """Queue a mode change for the next round. Returns a status string.
+
+        Anyone can do this, and it is announced with their name on it, which is
+        the same social contract as the map keys: fine among people who can see
+        each other, and the host can still fix the mode with --no-mode-vote.
+        """
+        if mode not in MODE_LABEL:
+            return "unknown mode"
+        target = self.mode if self.next_mode is None else self.next_mode
+        if mode == target:
+            return "already"
+        if mode == MODE_CTF and len(self.players) > self.mode_cap(MODE_CTF):
+            self.events.append({
+                "kind": "modefail", "mode": mode, "name": by_name,
+                "reason": f"capture the flag is 2v2 -- "
+                          f"{len(self.players)} players are connected",
+            })
+            return "too many players"
+
+        if mode == self.mode:
+            # Cancelling a queued change rather than asking for a new one.
+            self.next_mode = None
+        else:
+            self.next_mode = mode
+        self.events.append({"kind": "modenext", "mode": mode, "name": by_name})
+        return "ok"
+
+    def _apply_mode(self):
+        """Swap in a queued mode. Called from _start_round, nowhere else."""
+        if self.next_mode is None or self.next_mode == self.mode:
+            self.next_mode = None
+            return
+        self.mode = self.next_mode
+        self.next_mode = None
+        self.flags = []
+        self.team_score = [0, 0]
+        if not self.ctf:
+            # Leaving a team mode: everybody goes back to shooting everybody.
+            for p in self.players.values():
+                p.team = -1
+        else:
+            for p in self.players.values():
+                p.team = -1
+            for p in self.players.values():
+                p.team = self._pick_team()
+        self.roster_dirty = True
+        self.events.append({"kind": "mode", "mode": self.mode})
+
     # -- roster ---------------------------------------------------------------
 
     def free_slots(self):
-        return MAX_PLAYERS - len(self.players)
+        return self.max_players - len(self.players)
+
+    def _pick_team(self):
+        """Put the newcomer on the thinner side, ties going to blue."""
+        counts = [0, 0]
+        for p in self.players.values():
+            if p.team in (0, 1):
+                counts[p.team] += 1
+        return 0 if counts[0] <= counts[1] else 1
 
     def add_player(self, name):
         used = {p.color for p in self.players.values()}
@@ -145,12 +296,21 @@ class Game:
         pid = self._next_pid
         self._next_pid += 1
         p = Player(pid, name, color)
+        if self.ctf:
+            p.team = self._pick_team()
         self.players[pid] = p
-        self.events.append({"kind": "join", "name": name, "color": color})
+        self.events.append({"kind": "join", "name": name, "color": color,
+                            "team": p.team})
 
-        # Latecomers spectate the round in progress; if we were idle, they can
-        # start moving immediately and may well kick off the first round.
-        if self.phase in (PHASE_WAITING, PHASE_OVER):
+        if self.ctf and self.phase == PHASE_LIVE:
+            # No spectating in capture the flag -- there are respawns, so a
+            # latecomer just walks in on the next one.
+            p.waiting = False
+            p.alive = False
+            p.respawn_at = self.time + CTF_RESPAWN_TIME
+        elif self.phase in (PHASE_WAITING, PHASE_OVER):
+            # If we were idle they can start moving immediately, and may well
+            # kick off the first round.
             self._spawn(p, self._spawn_points())
             p.waiting = False
         return p
@@ -164,6 +324,14 @@ class Game:
             # Never leave the arena frozen for a player who is gone.
             self.hold_until = 0.0
             self.hold_pid = 0
+        # Do not let a flag leave with them.
+        for flag in self.flags:
+            if flag.carrier == pid:
+                flag.send_home()
+                self.events.append({"kind": "flagreturn", "team": flag.team})
+        if self.boss_pid == pid:
+            # The boss quit; the round has nothing left to be about.
+            self.boss_pid = None
         self.events.append({"kind": "leave", "name": p.name, "color": p.color})
 
     def set_input(self, pid, data):
@@ -232,17 +400,96 @@ class Game:
         random.shuffle(pts)
         return pts
 
-    def _spawn(self, player, points):
-        sx, sy = points.pop() if points else (ARENA_W / 2, ARENA_H / 2)
-        player.x, player.y = float(sx), float(sy)
+    def _place(self, player, x, y):
+        """Drop a player at (x, y), nudged clear if something is already there.
+
+        Only capture the flag needs the search: everyone on a team starts at
+        the same stand, and on Gridlock the tidy spot next to it is a pillar.
+        """
+        if not self.blocked(x, y, player.radius + 1):
+            player.x, player.y = float(x), float(y)
+            return
+        for step in range(1, 9):
+            r = 26.0 * step
+            for i in range(8):
+                a = i * math.tau / 8 + step * 0.4
+                nx = clamp(x + math.cos(a) * r, player.radius, ARENA_W - player.radius)
+                ny = clamp(y + math.sin(a) * r, player.radius, ARENA_H - player.radius)
+                if not self.blocked(nx, ny, player.radius + 1):
+                    player.x, player.y = nx, ny
+                    return
+        player.x, player.y = float(x), float(y)
+
+    def _reset_player(self, player):
         player.alive = True
         player.waiting = False
-        player.ammo = MAG_SIZE
+        player.respawn_at = 0.0
+        player.hp = player.hp_max
         player.reload_left = 0.0
         player.cooldown = 0.0
+        # Powers go first: the magazine you get depends on them, and coming
+        # back with last life's golden gun would hand you a one-round rifle.
         player.powers.clear()
+        player.ammo = self._mag_size(player)
+
+    def _spawn(self, player, points):
+        sx, sy = points.pop() if points else (ARENA_W / 2, ARENA_H / 2)
+        self._place(player, sx, sy)
+        self._reset_player(player)
+
+    def _spawn_at_base(self, player):
+        """Capture-the-flag spawn: on your own stand, facing the fight."""
+        bases = self.map["bases"]
+        bx, by = bases[player.team % len(bases)]
+        # Fan teammates out around the stand rather than stacking them on it.
+        a = random.uniform(0.0, math.tau)
+        self._place(player, bx + math.cos(a) * 46, by + math.sin(a) * 46)
+        self._reset_player(player)
+        player.aim = 0.0 if player.team == 0 else math.pi
+
+    def _reset_roles(self):
+        for p in self.players.values():
+            p.boss = False
+            p.hp_max = 1
+            p.hp = 1
+        self.boss_pid = None
+
+    def _maybe_pick_boss(self):
+        """Promote somebody, if this round is going to have a boss at all.
+
+        In free-for-all that is one round in seven on average, and only once
+        there is a real mob -- a boss with a single hunter is just a duel with
+        extra health. Boss rush skips the roll and takes anyone it can get,
+        because a round without a boss would be the mode failing to happen.
+        Either way, never the same player twice running.
+        """
+        floor = 2 if self.mode == MODE_BOSS else BOSS_MIN_PLAYERS
+        if len(self.players) < floor:
+            return
+        if self.mode != MODE_BOSS and random.random() >= BOSS_CHANCE:
+            return
+
+        pool = [p for p in self.players.values() if p.pid != self.last_boss]
+        if not pool:
+            pool = list(self.players.values())
+        boss = random.choice(pool)
+
+        boss.boss = True
+        foes = len(self.players) - 1
+        boss.hp_max = min(BOSS_HP_MAX, BOSS_HP_BASE + BOSS_HP_PER_FOE * foes)
+        boss.hp = boss.hp_max
+        self.boss_pid = boss.pid
+        self.last_boss = boss.pid
+
+    def _reset_flags(self):
+        bases = self.map["bases"]
+        self.flags = [Flag(t, bases[t][0], bases[t][1]) for t in range(2)]
+        self.team_score = [0, 0]
 
     def _start_round(self):
+        # A queued mode change lands here, before anything is placed.
+        self._apply_mode()
+
         # Rotate maps in order but with a random start, so a session sees all
         # five rather than re-rolling the same one twice in a row.
         if self.round_no > 0:
@@ -258,9 +505,20 @@ class Game:
         self.hold_pid = 0
         self.next_loot = LOOT_FIRST_DROP
 
-        points = self._spawn_points()
-        for p in self.players.values():
-            self._spawn(p, points)
+        # Roles are settled before anyone is placed, because a boss is wider
+        # than a normal player and has to be spawned with that in mind.
+        self._reset_roles()
+        if self.ctf:
+            self._reset_flags()
+            for p in self.players.values():
+                if p.team not in (0, 1):
+                    p.team = self._pick_team()
+                self._spawn_at_base(p)
+        else:
+            self._maybe_pick_boss()
+            points = self._spawn_points()
+            for p in self.players.values():
+                self._spawn(p, points)
 
         self.phase = PHASE_COUNTDOWN
         self.phase_end = self.time + COUNTDOWN_TIME
@@ -269,6 +527,11 @@ class Game:
             "map": self.map_index, "name": self.map["name"],
             "blurb": self.map["blurb"],
         })
+        if self.boss_pid is not None:
+            boss = self.players[self.boss_pid]
+            self.events.append({"kind": "boss", "pid": boss.pid,
+                                "name": boss.name, "color": boss.color,
+                                "hp": boss.hp_max})
 
     def jump_map(self, delta):
         """Debug hook: hop to the next/previous map and restart on it.
@@ -288,9 +551,14 @@ class Game:
         self.hold_pid = 0
         self.next_loot = LOOT_FIRST_DROP
 
-        points = self._spawn_points()
-        for p in self.players.values():
-            self._spawn(p, points)
+        if self.ctf:
+            self._reset_flags()
+            for p in self.players.values():
+                self._spawn_at_base(p)
+        else:
+            points = self._spawn_points()
+            for p in self.players.values():
+                self._spawn(p, points)
 
         if self.phase != PHASE_WAITING:
             self.phase = PHASE_COUNTDOWN
@@ -302,20 +570,56 @@ class Game:
             "blurb": self.map["blurb"],
         })
 
-    def _end_round(self, winner):
+    def _finish(self, result):
         self.phase = PHASE_OVER
         self.phase_end = self.time + ROUND_OVER_TIME
+        self.events.append(result)
+
+    def _end_round(self, winner):
         if winner is not None:
             winner.wins += 1
             self.last_winner = winner.name
-            self.events.append({"kind": "win", "name": winner.name,
-                                "color": winner.color})
+            self._finish({"kind": "win", "name": winner.name,
+                          "color": winner.color})
         else:
             self.last_winner = ""
-            self.events.append({"kind": "draw"})
+            self._finish({"kind": "draw"})
+
+    def _end_boss_round(self, boss, boss_won):
+        """Settle a boss round. The mob wins together or not at all."""
+        hunters = [p for p in self.players.values()
+                   if not p.boss and not p.waiting]
+        if boss_won:
+            boss.wins += 1
+            self.last_winner = boss.name
+        else:
+            # Everyone who was in the round shares the win, including whoever
+            # died drawing fire -- that is usually why the boss went down.
+            for p in hunters:
+                p.wins += 1
+            self.last_winner = "the hunters"
+        self._finish({"kind": "bossend", "boss_won": boss_won,
+                      "name": boss.name, "color": boss.color,
+                      "hunters": len(hunters)})
+
+    def _end_ctf_round(self):
+        a, b = self.team_score
+        if a == b:
+            self.last_winner = ""
+        else:
+            team = 0 if a > b else 1
+            self.last_winner = TEAM_NAMES[team]
+            for p in self.players.values():
+                if p.team == team:
+                    p.wins += 1
+        self._finish({"kind": "teamend", "score": list(self.team_score)})
 
     def _living(self):
         return [p for p in self.players.values() if p.alive and not p.waiting]
+
+    def _in_round(self):
+        """Players taking part in this round, alive or not."""
+        return [p for p in self.players.values() if not p.waiting]
 
     def _advance_phase(self):
         enough = len(self.players) >= 2
@@ -329,16 +633,24 @@ class Game:
                 self.phase = PHASE_WAITING
             elif self.time >= self.phase_end:
                 self.phase = PHASE_LIVE
-                self.phase_end = self.time + ROUND_TIME_LIMIT
+                self.phase_end = self.time + (
+                    CTF_ROUND_TIME if self.ctf else ROUND_TIME_LIMIT)
 
         elif self.phase == PHASE_LIVE:
-            alive = self._living()
             if not enough:
                 self.phase = PHASE_WAITING
-            elif len(alive) <= 1:
-                self._end_round(alive[0] if alive else None)
-            elif self.time >= self.phase_end:
-                self._end_round(None)
+            elif self.ctf:
+                if (max(self.team_score) >= CTF_CAPTURES_TO_WIN
+                        or self.time >= self.phase_end):
+                    self._end_ctf_round()
+            elif self.boss_pid is not None:
+                self._advance_boss_round()
+            else:
+                alive = self._living()
+                if len(alive) <= 1:
+                    self._end_round(alive[0] if alive else None)
+                elif self.time >= self.phase_end:
+                    self._end_round(None)
 
         elif self.phase == PHASE_OVER:
             if self.time >= self.phase_end:
@@ -346,9 +658,28 @@ class Game:
                     self._start_round()
                 else:
                     self.phase = PHASE_WAITING
+                    self._reset_roles()
                     points = self._spawn_points()
                     for p in self.players.values():
                         self._spawn(p, points)
+
+    def _advance_boss_round(self):
+        """A boss round ends when the boss falls or the last hunter does.
+
+        Running the clock out counts as a loss for the boss: it is the stronger
+        side by a distance, so sitting in a corner should not be rewarded.
+        """
+        boss = self.players.get(self.boss_pid)
+        if boss is None or boss.waiting:
+            self.boss_pid = None
+            return
+        hunters_alive = [p for p in self._living() if not p.boss]
+        if not boss.alive:
+            self._end_boss_round(boss, boss_won=False)
+        elif not hunters_alive:
+            self._end_boss_round(boss, boss_won=True)
+        elif self.time >= self.phase_end:
+            self._end_boss_round(boss, boss_won=False)
 
     # -- simulation -----------------------------------------------------------
 
@@ -359,8 +690,17 @@ class Game:
         held = self.hold_until > self.time
         if held:
             # A time stop takes the round clock with it, so nobody loses the
-            # round to a timer that ran while they could not move.
+            # round to a timer that ran while they could not move. Every other
+            # deadline that decides a round goes with it for the same reason:
+            # a frozen player should not respawn, and a dropped flag should not
+            # walk itself home, on time nobody could play through.
             self.phase_end += dt
+            for p in self.players.values():
+                if p.respawn_at > 0.0 and p.pid != self.hold_pid:
+                    p.respawn_at += dt
+            for flag in self.flags:
+                if flag.return_at > 0.0:
+                    flag.return_at += dt
         elif self.hold_pid:
             self.events.append({"kind": "unhold"})
             self.hold_pid = 0
@@ -376,6 +716,9 @@ class Game:
 
         free_play = self.phase == PHASE_WAITING
         can_act = self.phase == PHASE_LIVE or free_play
+
+        if self.ctf and self.phase == PHASE_LIVE:
+            self._step_respawns()
 
         for p in self.players.values():
             frozen = held and p.pid != self.hold_pid
@@ -395,15 +738,32 @@ class Game:
             self._step_frost(dt)
         if can_act:
             self._step_loot(dt)
+        if self.ctf and self.phase == PHASE_LIVE:
+            self._step_flags(dt)
+
+    def _step_respawns(self):
+        for p in self.players.values():
+            if p.alive or p.waiting or p.respawn_at <= 0.0:
+                continue
+            if self.time >= p.respawn_at:
+                self._spawn_at_base(p)
+                self.events.append({"kind": "respawn", "pid": p.pid,
+                                    "x": p.x, "y": p.y, "team": p.team})
 
     def _move_player(self, p, dt):
         dx = (1 if p.inp["right"] else 0) - (1 if p.inp["left"] else 0)
         dy = (1 if p.inp["down"] else 0) - (1 if p.inp["up"] else 0)
         if not (dx or dy):
             return
+        # Everything that touches move speed stacks multiplicatively, so a
+        # sprinting boss slowed by ice is still faster than a walking one.
         speed = PLAYER_SPEED * (SWIFT_MULT if p.has(P_SWIFT, self.time) else 1.0)
         if self._in_frost(p):
             speed *= FROST_SLOW
+        if p.boss:
+            speed *= BOSS_SPEED_MULT
+        if self.carried_by(p) is not None:
+            speed *= FLAG_CARRY_MULT
         inv = speed * dt / math.hypot(dx, dy)
         self._slide(p, dx * inv, 0.0)
         self._slide(p, 0.0, dy * inv)
@@ -414,19 +774,20 @@ class Game:
         Resolving the axes separately is what lets you slide along a wall
         instead of sticking to it.
         """
+        rad = p.radius
         p.x += dx
         p.y += dy
         for w in self.rects:
-            if not circle_hits_rect(p.x, p.y, PLAYER_RADIUS, w):
+            if not circle_hits_rect(p.x, p.y, rad, w):
                 continue
             if dx > 0:
-                p.x = w[0] - PLAYER_RADIUS
+                p.x = w[0] - rad
             elif dx < 0:
-                p.x = w[0] + w[2] + PLAYER_RADIUS
+                p.x = w[0] + w[2] + rad
             if dy > 0:
-                p.y = w[1] - PLAYER_RADIUS
+                p.y = w[1] - rad
             elif dy < 0:
-                p.y = w[1] + w[3] + PLAYER_RADIUS
+                p.y = w[1] + w[3] + rad
 
     def _push_out(self, p):
         """Shove a player clear of rotor bars and of blocks that moved into them.
@@ -434,10 +795,11 @@ class Game:
         Runs every tick regardless of input, because on the dynamic maps the
         geometry comes to you.
         """
+        pr = p.radius
         for x0, y0, x1, y1, rad in self.bars:
             cx, cy = closest_point_on_segment(p.x, p.y, x0, y0, x1, y1)
             dx, dy = p.x - cx, p.y - cy
-            need = rad + PLAYER_RADIUS
+            need = rad + pr
             d2 = dx * dx + dy * dy
             if d2 >= need * need:
                 continue
@@ -449,14 +811,14 @@ class Game:
             p.y = cy + dy / d * need
 
         for w in self.rects:
-            if not circle_hits_rect(p.x, p.y, PLAYER_RADIUS, w):
+            if not circle_hits_rect(p.x, p.y, pr, w):
                 continue
             # Escape along whichever face is nearest.
             moves = (
-                (0, (w[0] - PLAYER_RADIUS) - p.x),
-                (0, (w[0] + w[2] + PLAYER_RADIUS) - p.x),
-                (1, (w[1] - PLAYER_RADIUS) - p.y),
-                (1, (w[1] + w[3] + PLAYER_RADIUS) - p.y),
+                (0, (w[0] - pr) - p.x),
+                (0, (w[0] + w[2] + pr) - p.x),
+                (1, (w[1] - pr) - p.y),
+                (1, (w[1] + w[3] + pr) - p.y),
             )
             axis, delta = min(moves, key=lambda mv: abs(mv[1]))
             if axis == 0:
@@ -464,8 +826,8 @@ class Game:
             else:
                 p.y += delta
 
-        p.x = clamp(p.x, PLAYER_RADIUS, ARENA_W - PLAYER_RADIUS)
-        p.y = clamp(p.y, PLAYER_RADIUS, ARENA_H - PLAYER_RADIUS)
+        p.x = clamp(p.x, pr, ARENA_W - pr)
+        p.y = clamp(p.y, pr, ARENA_H - pr)
 
     # -- frost ----------------------------------------------------------------
 
@@ -475,10 +837,16 @@ class Game:
         self.frost = [z for z in self.frost if z.ttl > 0.0]
 
     def _in_frost(self, p):
-        """True if `p` is standing in someone else's ice."""
-        reach = FROST_RADIUS + PLAYER_RADIUS
+        """True if `p` is standing in ice laid by the other side.
+
+        Your own patches never slow you, and neither do a teammate's: ice
+        follows the same sides as bullets do, so laying a field across a
+        corridor in capture the flag does not strand the player you laid it
+        for. In free-for-all that is everyone but you, exactly as before.
+        """
+        reach = FROST_RADIUS + p.radius
         for z in self.frost:
-            if z.owner == p.pid:
+            if not self._hostile(z.owner, p):
                 continue
             if (p.x - z.x) ** 2 + (p.y - z.y) ** 2 <= reach * reach:
                 return True
@@ -503,10 +871,14 @@ class Game:
     # -- weapon ---------------------------------------------------------------
 
     def _mag_size(self, p):
-        return GOLDEN_MAG if p.has(P_GOLDEN, self.time) else MAG_SIZE
+        if p.has(P_GOLDEN, self.time):
+            return GOLDEN_MAG
+        return BOSS_MAG if p.boss else MAG_SIZE
 
     def _reload_time(self, p):
-        return GOLDEN_RELOAD if p.has(P_GOLDEN, self.time) else RELOAD_TIME
+        if p.has(P_GOLDEN, self.time):
+            return GOLDEN_RELOAD
+        return BOSS_RELOAD if p.boss else RELOAD_TIME
 
     def _begin_reload(self, p):
         p.reload_total = self._reload_time(p)
@@ -541,6 +913,8 @@ class Game:
             return
 
         cd = FIRE_COOLDOWN * (RAPID_MULT if p.has(P_RAPID, self.time) else 1.0)
+        if p.boss:
+            cd *= BOSS_FIRE_MULT
         p.cooldown = cd
         if not infinite:
             p.ammo -= 1
@@ -551,22 +925,28 @@ class Game:
     def _fire(self, p):
         golden = p.has(P_GOLDEN, self.time)
         homing = p.has(P_HOMING, self.time)
+        ghost = p.has(P_GHOST, self.time)
 
         speed = BULLET_SPEED
         if golden:
             speed *= GOLDEN_SPEED_MULT
         elif p.has(P_VELOCITY, self.time):
             speed *= VELOCITY_MULT
+        if ghost:
+            speed *= GHOST_SPEED_MULT
+        if p.boss:
+            speed *= BOSS_BULLET_MULT
 
         flags = ((BF_GOLD if golden else 0) | (BF_HOMING if homing else 0)
                  | (BF_BOUNCE if p.has(P_BOUNCE, self.time) else 0)
-                 | (BF_FROST if p.has(P_FROST, self.time) else 0))
+                 | (BF_FROST if p.has(P_FROST, self.time) else 0)
+                 | (BF_GHOST if ghost else 0))
         # The golden gun stays a single precise round even under scatter.
         offsets = ((-SCATTER_ANGLE, 0.0, SCATTER_ANGLE)
                    if p.has(P_SCATTER, self.time) and not golden else (0.0,))
         spread = 0.0 if golden else SPREAD
 
-        muzzle = PLAYER_RADIUS + BULLET_RADIUS + 2
+        muzzle = p.radius + BULLET_RADIUS + 2
         for off in offsets:
             ang = p.aim + off + random.uniform(-spread, spread)
             ca, sa = math.cos(ang), math.sin(ang)
@@ -580,11 +960,30 @@ class Game:
             self.events.append({"kind": "shot", "pid": p.pid, "x": p.x,
                                 "y": p.y, "aim": round(p.aim, 3)})
 
+    def _hostile(self, owner_pid, victim):
+        """Can a round fired by `owner_pid` hurt `victim`?
+
+        Free-for-all says yes to everyone but yourself. Teams -- either half of
+        a capture-the-flag match, or the mob during a boss round -- shoot
+        through each other, so nobody loses a round to a teammate's stray shot
+        while everyone is crowding the same corridor.
+        """
+        if victim.pid == owner_pid:
+            return False
+        owner = self.players.get(owner_pid)
+        if owner is None:
+            return True  # shooter disconnected; their rounds still count
+        if self.ctf:
+            return owner.team != victim.team
+        if self.boss_pid is not None:
+            return owner.boss != victim.boss
+        return True
+
     def _home(self, b, dt):
         """Curve a homing round towards the nearest valid target."""
         best, best_d2 = None, HOMING_RANGE * HOMING_RANGE
         for p in self.players.values():
-            if not p.alive or p.waiting or p.pid == b.owner:
+            if not p.alive or p.waiting or not self._hostile(b.owner, p):
                 continue
             d2 = (p.x - b.x) ** 2 + (p.y - b.y) ** 2
             if d2 < best_d2:
@@ -625,7 +1024,10 @@ class Game:
             b.x += b.vx * dt
             b.y += b.vy * dt
 
-            if self._bullet_blocked(x0, y0, b.x, b.y):
+            # A ghost round only reports blocked at the arena border, so the
+            # two powerups compose: it passes through the map and, if it is
+            # also a ricochet, rebounds off the edge instead of dying there.
+            if self._bullet_blocked(x0, y0, b.x, b.y, b.flags):
                 if not self._bounce(b, x0, y0):
                     self.events.append({"kind": "spark", "x": b.x, "y": b.y})
                     self._drop_frost(b, x0, y0)
@@ -638,10 +1040,10 @@ class Game:
             # rounds" powerup makes bullets fast enough for it to matter.
             victim = None
             for p in self.players.values():
-                if not p.alive or p.waiting or p.pid == b.owner:
+                if not p.alive or p.waiting or not self._hostile(b.owner, p):
                     continue
                 if segment_hits_circle(x0, y0, b.x, b.y, p.x, p.y,
-                                       PLAYER_RADIUS + BULLET_RADIUS):
+                                       p.radius + BULLET_RADIUS):
                     victim = p
                     break
 
@@ -651,7 +1053,11 @@ class Game:
                 self._drop_frost(b)
         self.bullets = alive
 
-    def _bullet_blocked(self, x0, y0, x1, y1):
+    def _bullet_blocked(self, x0, y0, x1, y1, flags=0):
+        if flags & BF_GHOST:
+            # A ghost round ignores the map, but not the edge of it -- letting
+            # them leave would just be a shot that quietly never existed.
+            return any(point_in_rect(x1, y1, rect) for rect in BORDER)
         for rect in self.rects:
             if point_in_rect(x1, y1, rect):
                 return True
@@ -725,7 +1131,10 @@ class Game:
         step = BULLET_RADIUS + 2
         b.x = x0 + b.vx / speed * step
         b.y = y0 + b.vy / speed * step
-        if self._bullet_blocked(b.x, b.y, b.x, b.y):
+        # Flags matter here: a ghost round is only ever "wedged" by the border,
+        # and would otherwise be killed by the wall it is entitled to fly
+        # through on its way out of the bounce.
+        if self._bullet_blocked(b.x, b.y, b.x, b.y, b.flags):
             # Wedged in a corner or a mover closed on it; let it die.
             return False
         return True
@@ -759,6 +1168,16 @@ class Game:
                                 "x": bullet.x, "y": bullet.y})
             return False
 
+        # A boss is the one thing here with a health bar; chip it instead.
+        if victim.hp > 1:
+            victim.hp -= 1
+            if shooter and shooter is not victim:
+                shooter.kills += 1
+            self.events.append({"kind": "bosshit", "pid": victim.pid,
+                                "hp": victim.hp, "hp_max": victim.hp_max,
+                                "x": bullet.x, "y": bullet.y})
+            return False
+
         self.events.append({"kind": "spark", "x": bullet.x, "y": bullet.y})
         victim.deaths += 1
         if shooter and shooter is not victim:
@@ -769,8 +1188,10 @@ class Game:
             "killer_color": shooter.color if shooter else 5,
             "victim": victim.name,
             "victim_color": victim.color,
+            "boss": 1 if victim.boss else 0,
             "x": victim.x, "y": victim.y,
         })
+        self._drop_flag(victim)
 
         if self.phase == PHASE_WAITING:
             # Practice mode: straight back in, no round to lose.
@@ -778,6 +1199,8 @@ class Game:
         else:
             victim.alive = False
             victim.powers.clear()
+            if self.ctf:
+                victim.respawn_at = self.time + CTF_RESPAWN_TIME
         return False
 
     # -- loot -----------------------------------------------------------------
@@ -797,7 +1220,7 @@ class Game:
                 if not p.alive or p.waiting:
                     continue
                 if ((p.x - box.x) ** 2 + (p.y - box.y) ** 2
-                        <= (PLAYER_RADIUS + BOX_RADIUS) ** 2):
+                        <= (p.radius + BOX_RADIUS) ** 2):
                     self._grant(p, box.kind)
                     self.loot.remove(box)
                     break
@@ -821,6 +1244,107 @@ class Game:
             self.events.append({"kind": "drop", "x": x, "y": y})
             return
 
+    # -- capture the flag -----------------------------------------------------
+
+    def carried_by(self, player):
+        """The flag this player is running, if any. Cheap -- there are two."""
+        for flag in self.flags:
+            if flag.carrier == player.pid:
+                return flag
+        return None
+
+    def _drop_flag(self, player):
+        """Let go of whatever a player was carrying, wherever they were."""
+        for flag in self.flags:
+            if flag.carrier != player.pid:
+                continue
+            flag.carrier = None
+            flag.at_home = False
+            flag.x, flag.y = player.x, player.y
+            flag.return_at = self.time + FLAG_RETURN_TIME
+            self.events.append({"kind": "flagdrop", "team": flag.team,
+                                "x": flag.x, "y": flag.y})
+
+    def _step_flags(self, dt):
+        """Pickups, returns and captures, in that order, once per tick."""
+        for flag in self.flags:
+            if flag.carrier is not None:
+                carrier = self.players.get(flag.carrier)
+                if carrier is None:
+                    # Should not happen -- remove_player covers it -- but a
+                    # flag stuck on a ghost carrier would be unrecoverable.
+                    flag.send_home()
+                    self.events.append({"kind": "flagreturn", "team": flag.team,
+                                        "auto": 1})
+                elif carrier.alive and not carrier.waiting:
+                    flag.x, flag.y = carrier.x, carrier.y
+                else:
+                    # Died or was benched between ticks; treat it as a drop.
+                    self._drop_flag(carrier)
+                continue
+            if flag.state == FLAG_DROPPED and self.time >= flag.return_at:
+                flag.send_home()
+                self.events.append({"kind": "flagreturn", "team": flag.team,
+                                    "auto": 1})
+
+        for p in self.players.values():
+            if not p.alive or p.waiting:
+                continue
+            reach = (p.radius + FLAG_RADIUS) ** 2
+            for flag in self.flags:
+                if flag.carrier is not None:
+                    continue
+                if (p.x - flag.x) ** 2 + (p.y - flag.y) ** 2 > reach:
+                    continue
+                if flag.team == p.team:
+                    # Touching your own flag on the floor puts it back on the
+                    # stand -- the standard counter to a stalled capture.
+                    if flag.state == FLAG_DROPPED:
+                        flag.send_home()
+                        self.events.append({"kind": "flagreturn",
+                                            "team": flag.team, "pid": p.pid,
+                                            "name": p.name})
+                else:
+                    flag.carrier = p.pid
+                    flag.at_home = False
+                    flag.x, flag.y = p.x, p.y
+                    self.events.append({"kind": "flagtake", "team": flag.team,
+                                        "pid": p.pid, "name": p.name,
+                                        "color": p.color, "by_team": p.team,
+                                        "x": p.x, "y": p.y})
+            self._try_capture(p)
+
+    def _try_capture(self, p):
+        """Score if a carrier reaches home -- and their own flag is on it.
+
+        Requiring your flag to be home is what makes defending worth doing:
+        two players cannot simply run past each other and trade captures.
+        """
+        if p.team not in (0, 1):
+            return
+        carried = self.carried_by(p)
+        if carried is None:
+            return
+        own = self.flags[p.team]
+        home_x, home_y = own.home_x, own.home_y
+        if (p.x - home_x) ** 2 + (p.y - home_y) ** 2 > BASE_RADIUS ** 2:
+            return
+        if not own.at_home:
+            # Throttled: they are standing on the stand, so this would
+            # otherwise fire sixty times a second while they wait.
+            if self.time - self._nocap_at.get(p.pid, -99.0) > 2.5:
+                self._nocap_at[p.pid] = self.time
+                self.events.append({"kind": "nocap", "pid": p.pid,
+                                    "team": p.team})
+            return
+
+        carried.send_home()
+        self.team_score[p.team] += 1
+        self.events.append({"kind": "capture", "pid": p.pid, "name": p.name,
+                            "color": p.color, "team": p.team,
+                            "score": list(self.team_score),
+                            "x": p.x, "y": p.y})
+
     def _grant(self, p, kind):
         p.powers[kind] = self.time + POWERUP_DURATION[kind]
         if kind == P_AMMO:
@@ -836,6 +1360,15 @@ class Game:
             # Hand over a loaded golden gun rather than whatever was left.
             p.ammo = GOLDEN_MAG
             p.reload_left = 0.0
+        elif kind == P_QUAKE:
+            # Nothing in the simulation moves for this one -- the server just
+            # names everyone whose window should start rattling. Teammates are
+            # spared, so it uses the same sides everything else does.
+            targets = [q.pid for q in self.players.values()
+                       if self._hostile(p.pid, q)]
+            self.events.append({"kind": "quake", "pids": targets,
+                                "secs": POWERUP_DURATION[P_QUAKE],
+                                "name": p.name, "color": p.color})
         self.events.append({"kind": "pickup", "pid": p.pid, "power": kind,
                             "name": p.name, "color": p.color,
                             "x": p.x, "y": p.y})
@@ -843,7 +1376,8 @@ class Game:
     # -- serialisation --------------------------------------------------------
 
     def roster(self):
-        return [{"id": p.pid, "name": p.name, "color": p.color}
+        return [{"id": p.pid, "name": p.name, "color": p.color,
+                 "team": p.team}
                 for p in self.players.values()]
 
     def anyone_invisible(self):
@@ -870,6 +1404,12 @@ class Game:
             p.wins, p.kills, p.deaths,
             1 if p.waiting else 0,
             1 if hidden else 0,
+            p.team,
+            1 if p.boss else 0,
+            p.hp, p.hp_max,
+            # Seconds until they are back, for the client's respawn clock.
+            (round(max(0.0, p.respawn_at - now), 1)
+             if not p.alive and p.respawn_at > 0.0 else 0),
         ]
 
     def snapshot(self, viewer=None):
@@ -891,6 +1431,16 @@ class Game:
             "pt": round(max(0.0, self.phase_end - now), 2),
             "rd": self.round_no,
             "mi": self.map_index,
+            "gm": self.mode,
+            # What the next round will be. Equal to "gm" when nothing is
+            # queued, so the client just compares the two.
+            "nm": self.mode if self.next_mode is None else self.next_mode,
+            "bs": self.boss_pid or 0,
+            "sc": list(self.team_score) if self.ctf else [0, 0],
+            # "fl" flags, "fz" frost -- both features arrived wanting to be
+            # "f", and a dict literal keeps only the last of a repeated key.
+            "fl": [[f.team, round(f.x, 1), round(f.y, 1),
+                    f.carrier or 0, f.state] for f in self.flags],
             "p": [self._player_row(p, now, viewer)
                   for p in self.players.values()],
             "b": [[round(b.x, 1), round(b.y, 1), b.owner, b.flags]
@@ -899,8 +1449,8 @@ class Game:
                   for box in self.loot],
             # Ice patches: position, who laid it (they walk through freely) and
             # how much life is left, which the client fades out.
-            "f": [[round(z.x, 1), round(z.y, 1), z.owner,
-                   round(z.ttl / FROST_TIME, 2)] for z in self.frost],
+            "fz": [[round(z.x, 1), round(z.y, 1), z.owner,
+                    round(z.ttl / FROST_TIME, 2)] for z in self.frost],
             # Time stop: seconds left, and who is still allowed to move.
             "hd": round(max(0.0, self.hold_until - now), 2),
             "hp": self.hold_pid,

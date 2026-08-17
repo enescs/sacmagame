@@ -8,7 +8,7 @@ import threading
 import time
 from collections import deque
 
-from .shared import DISCOVERY_MAGIC, DISCOVERY_PORT
+from .shared import DISCOVERY_MAGIC, DISCOVERY_PORT, MODE_FFA
 
 
 class NetClient(threading.Thread):
@@ -33,6 +33,8 @@ class NetClient(threading.Thread):
 
         self.my_id = None
         self.my_color = 0
+        self.my_team = -1
+        self.mode = MODE_FFA
         self.server_name = ""
         self.state = None            # latest snapshot
         self.roster = {}             # pid -> {"name": str, "color": int}
@@ -106,10 +108,15 @@ class NetClient(threading.Thread):
         elif kind == "welcome":
             self.my_id = msg.get("id")
             self.my_color = msg.get("color", 0)
+            self.my_team = msg.get("team", -1)
+            self.mode = msg.get("mode", MODE_FFA)
             self.server_name = msg.get("server", "")
             self.connected = True
         elif kind == "roster":
             self.roster = {p["id"]: p for p in msg.get("players", [])}
+            me = self.roster.get(self.my_id)
+            if me:
+                self.my_team = me.get("team", self.my_team)
         elif kind == "ev":
             for item in msg.get("items", []):
                 self.events.append(item)
@@ -117,6 +124,12 @@ class NetClient(threading.Thread):
             ts = msg.get("ts")
             if isinstance(ts, (int, float)):
                 self.ping_ms = (time.perf_counter() - ts) * 1000.0
+        elif kind == "notice":
+            # Something the server declined to do. Rides the event stream so it
+            # lands in the feed like anything else -- unlike "error", which is
+            # fatal and ends the session.
+            self.events.append({"kind": "notice",
+                                "text": str(msg.get("msg", ""))[:120]})
         elif kind == "error":
             self.error = msg.get("msg", "Server refused the connection.")
             self.closing = True
@@ -174,6 +187,7 @@ class Discovery(threading.Thread):
                     "max": msg.get("max", 8),
                     "map": msg.get("map", "?"),
                     "round": msg.get("round", 0),
+                    "mode": msg.get("mode", MODE_FFA),
                     "seen": time.time(),
                 }
 

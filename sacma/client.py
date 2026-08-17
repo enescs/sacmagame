@@ -22,20 +22,23 @@ import pygame
 from .maps import MAPS, mover_rect, rotor_segment
 from .net import Discovery, NetClient
 from .shared import (
-    ARENA_H, ARENA_W, BF_BOUNCE, BF_FROST, BF_GOLD, BF_HOMING, BF_PARRIED, BG,
-    BORDER, BOX_RADIUS, FROST_RADIUS,
-    BULLET_RADIUS, CHAT_MAX_LEN, CHAT_MAX_LINES, CHAT_SHOW_TIME, DEFAULT_PORT,
-    GRID, HAZARD_EDGE, HAZARD_FILL, HUD_BG, HUD_H, MAG_SIZE, PHASE_COUNTDOWN,
-    PHASE_LIVE, PHASE_OVER, PHASE_WAITING, PLAYER_COLORS, PLAYER_RADIUS,
-    POWERUPS, POWERUP_BIT, POWERUP_COLOR, POWERUP_LABEL, P_BOUNCE, P_FROST,
-    P_GOLDEN, P_HOLD, P_HOMING, P_INVIS, P_REFLECT, P_SHIELD, TEXT, TEXT_DIM,
-    WALL_EDGE, WALL_FILL,
+    ARENA_H, ARENA_W, BASE_RADIUS, BF_BOUNCE, BF_FROST, BF_GHOST, BF_GOLD,
+    BF_HOMING, BF_PARRIED, BG, BORDER, BOSS_COLOR, BOSS_MAG, BOSS_RADIUS,
+    BOX_RADIUS, BULLET_RADIUS, CHAT_MAX_LEN, CHAT_MAX_LINES, CHAT_SHOW_TIME,
+    CTF_CAPTURES_TO_WIN, DEFAULT_PORT, FLAG_CARRIED, FLAG_DROPPED, FLAG_RADIUS,
+    FROST_RADIUS, GRID, HAZARD_EDGE, HAZARD_FILL, HUD_BG, HUD_H, MAG_SIZE,
+    MODE_BLURB, MODE_CTF, MODE_LABEL, MODE_ORDER, PHASE_COUNTDOWN, PHASE_LIVE,
+    PHASE_OVER, PHASE_WAITING, PLAYER_COLORS, PLAYER_RADIUS, POWERUPS,
+    POWERUP_BIT, POWERUP_COLOR, POWERUP_LABEL, P_BOUNCE, P_FROST, P_GHOST,
+    P_GOLDEN, P_HOLD, P_HOMING, P_INVIS, P_REFLECT, P_SHIELD, QUAKE_AMPLITUDE,
+    QUAKE_FREQ, TEAM_COLORS, TEAM_NAMES, TEXT, TEXT_DIM, WALL_EDGE, WALL_FILL,
     WINDOW_H, WINDOW_W,
 )
 
 # Snapshot player-row indices, mirroring Game.snapshot().
 P_ID, P_X, P_Y, P_AIM, P_ALIVE, P_AMMO, P_RELOAD, P_BITS = 0, 1, 2, 3, 4, 5, 6, 7
 P_WINS, P_KILLS, P_DEATHS, P_WAIT, P_HID = 8, 9, 10, 11, 12
+P_TEAM, P_BOSS, P_HP, P_HPMAX, P_RESP = 13, 14, 15, 16, 17
 
 
 ICON_DIR = os.path.join(os.path.dirname(__file__), "assets", "powerups")
@@ -53,6 +56,8 @@ ICON_ALIASES = {
     "golden": ("goldengun",),
     "bounce": ("recochet", "ricochet"),
     "hold": ("timestop",),
+    "ghost": ("ghostrounds",),
+    "quake": ("earthquake",),
 }
 
 
@@ -154,6 +159,98 @@ def _fade(color, t):
             int(color[2] * t + BG[2] * (1 - t)))
 
 
+class WindowShake:
+    """The earthquake powerup: rattle the actual desktop window.
+
+    Moving the window rather than the camera is the whole point -- the mouse
+    stays where it is on the desk while the arena slides under it, so aiming
+    genuinely wanders for a few seconds. Two frequencies per axis keep it from
+    reading as a straight diagonal buzz, and the amplitude decays to nothing.
+
+    Not every desktop lets an application place its own window (Wayland, most
+    obviously). We find out by asking for a move and reading the position back;
+    if nothing happened, we shake the drawn frame inside the window instead,
+    which looks nearly the same from a chair.
+    """
+
+    def __init__(self):
+        self.left = 0.0
+        self.total = 0.0
+        self.base = None
+        self.can_move = None   # None until the first attempts tell us
+        self.offset = (0, 0)   # used only by the fallback
+        self._probes = 0
+
+    def start(self, seconds):
+        if self.left <= 0.0:
+            self.base = self._position()
+        # Overlapping quakes extend rather than stack, so two pickups in a row
+        # cannot double the amplitude.
+        self.left = max(self.left, seconds)
+        self.total = max(self.total, seconds)
+
+    @property
+    def active(self):
+        return self.left > 0.0
+
+    def _position(self):
+        try:
+            return pygame.display.get_window_position()
+        except (AttributeError, pygame.error):
+            return None
+
+    def _move_to(self, pos):
+        try:
+            pygame.display.set_window_position(pos)
+            return True
+        except (AttributeError, pygame.error):
+            return False
+
+    def update(self, dt, now):
+        if self.left <= 0.0:
+            return
+        self.left -= dt
+        if self.left <= 0.0:
+            self.stop()
+            return
+
+        amp = QUAKE_AMPLITUDE * (self.left / self.total if self.total else 0.0)
+        dx = amp * (math.sin(now * QUAKE_FREQ) * 0.7
+                    + math.sin(now * QUAKE_FREQ * 2.3 + 1.1) * 0.3)
+        dy = amp * (math.sin(now * QUAKE_FREQ * 1.4 + 2.0) * 0.7
+                    + math.sin(now * QUAKE_FREQ * 3.1) * 0.3)
+
+        if self.can_move is not False and self.base:
+            want = (int(self.base[0] + dx), int(self.base[1] + dy))
+            moved = self._move_to(want)
+            if self.can_move is None:
+                # Probe: a window manager that ignores us keeps reporting the
+                # old spot. Give it a few frames -- the move is a round trip
+                # through the WM, so the first read back can lag -- and only
+                # judge on frames where we asked for a visible displacement.
+                if abs(want[0] - self.base[0]) + abs(want[1] - self.base[1]) >= 3:
+                    got = self._position()
+                    if moved and got and got != self.base:
+                        self.can_move = True
+                    else:
+                        self._probes += 1
+                        if self._probes >= 8:
+                            self.can_move = False
+            if self.can_move:
+                self.offset = (0, 0)
+                return
+            if self.can_move is None:
+                return  # still deciding; do not shake twice over
+        self.offset = (int(dx), int(dy))
+
+    def stop(self):
+        self.left = 0.0
+        self.offset = (0, 0)
+        if self.can_move and self.base:
+            self._move_to(self.base)
+        self.base = None
+
+
 class App:
     def __init__(self, name, host, port):
         pygame.init()
@@ -166,6 +263,8 @@ class App:
         self.win_size = (int(WINDOW_W * self.scale), int(WINDOW_H * self.scale))
         self.screen = pygame.display.set_mode(self.win_size)
         self.canvas = pygame.Surface((WINDOW_W, WINDOW_H))
+        # Only used while an earthquake is shaking a scaled-down window.
+        self.scaled = pygame.Surface(self.win_size)
         self.clock = pygame.time.Clock()
 
         self.f_small = pygame.font.Font(None, 20)
@@ -178,9 +277,11 @@ class App:
         self.name = name
         self.net = None
         self.fx = Effects()
+        self.shake = WindowShake()
         self.feed = []          # [(surface, expiry)]
         self.chat = []          # [[name surface, text surface, expiry]]
         self.banner = ""
+        self.sub_banner = ""    # boss announcement, shown under the countdown
         self.round_result = ""
 
         self.discovery = Discovery()
@@ -189,6 +290,8 @@ class App:
         self.typing = None      # None | "name" | "host" | "chat"
         self.typed = ""
         self.status = ""
+        self.picking = False    # the in-game mode picker is open
+        self.pick_sel = 0
 
         self.screen_state = "menu"
         if host:
@@ -206,6 +309,7 @@ class App:
         self.feed.clear()
         self.chat.clear()
         self.banner = ""
+        self.sub_banner = ""
         self.round_result = ""
 
     def disconnect(self):
@@ -214,6 +318,7 @@ class App:
             self.net = None
         if self.typing == "chat":
             self.typing = None
+        self.shake.stop()
         self.screen_state = "menu"
 
     # -- main loop ------------------------------------------------------------
@@ -224,6 +329,7 @@ class App:
             dt = min(self.clock.tick(60) / 1000.0, 0.05)
             running = self.handle_events()
             self.fx.update(dt)
+            self.shake.update(dt, time.perf_counter())
 
             if self.screen_state == "menu":
                 self.draw_menu()
@@ -236,11 +342,20 @@ class App:
                     self.drain_events()
                     self.draw_game()
 
+            # The fallback path for desktops that will not let us move the
+            # window: shift the frame inside it instead, on the same numbers.
+            at = self.shake.offset
+            if at != (0, 0):
+                self.screen.fill((0, 0, 0))
             if self.scale == 1.0:
-                self.screen.blit(self.canvas, (0, 0))
-            else:
+                self.screen.blit(self.canvas, at)
+            elif at == (0, 0):
                 pygame.transform.smoothscale(self.canvas, self.win_size,
                                              self.screen)
+            else:
+                pygame.transform.smoothscale(self.canvas, self.win_size,
+                                             self.scaled)
+                self.screen.blit(self.scaled, at)
             pygame.display.flip()
 
         self.disconnect()
@@ -270,12 +385,22 @@ class App:
                     self.typed += ev.unicode
                 continue
 
+            if self.picking:
+                # The picker owns the keyboard while it is up, so choosing a
+                # mode can never also walk you into the open.
+                self.handle_pick_key(ev.key)
+                continue
+
             if ev.key == pygame.K_ESCAPE:
                 if self.screen_state == "play":
                     self.status = ""
                     self.disconnect()
                 else:
                     return False
+
+            elif (self.screen_state == "play" and self.net
+                    and ev.key == pygame.K_m):
+                self.open_picker()
 
             elif (self.screen_state == "play" and self.net
                     and ev.key in (pygame.K_t, pygame.K_RETURN)):
@@ -307,6 +432,34 @@ class App:
                 elif ev.key == pygame.K_TAB:
                     self.typing, self.typed = "name", self.name
         return True
+
+    # -- mode picker ----------------------------------------------------------
+
+    def open_picker(self):
+        """Open on whatever the next round is already set to be."""
+        snap = self.snapshot()
+        current = snap.get("nm", snap.get("gm", 0)) if snap else 0
+        self.pick_sel = (MODE_ORDER.index(current)
+                         if current in MODE_ORDER else 0)
+        self.picking = True
+
+    def handle_pick_key(self, key):
+        if key in (pygame.K_ESCAPE, pygame.K_m):
+            self.picking = False
+        elif key in (pygame.K_DOWN, pygame.K_s):
+            self.pick_sel = (self.pick_sel + 1) % len(MODE_ORDER)
+        elif key in (pygame.K_UP, pygame.K_w):
+            self.pick_sel = (self.pick_sel - 1) % len(MODE_ORDER)
+        elif pygame.K_1 <= key < pygame.K_1 + len(MODE_ORDER):
+            self.pick_sel = key - pygame.K_1
+            self.commit_pick()
+        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
+            self.commit_pick()
+
+    def commit_pick(self):
+        if self.net:
+            self.net.send({"t": "mode", "mode": MODE_ORDER[self.pick_sel]})
+        self.picking = False
 
     def commit_typing(self):
         if self.typing == "name":
@@ -340,9 +493,10 @@ class App:
         if me:
             aim = math.atan2(my - me[P_Y], mx - me[P_X])
 
-        # While the chat box is open the keyboard belongs to it -- keep aiming
-        # (the mouse is still yours) but stop moving, shooting and reloading.
-        chatting = self.typing == "chat"
+        # While the chat box or the mode picker is open the keyboard belongs to
+        # it -- keep aiming (the mouse is still yours) but stop moving,
+        # shooting and reloading.
+        chatting = self.typing == "chat" or self.picking
 
         net.send({
             "t": "input",
@@ -397,12 +551,19 @@ class App:
 
             elif kind == "kill":
                 col = PLAYER_COLORS[ev["victim_color"] % len(PLAYER_COLORS)]
-                self.fx.burst(ev["x"], ev["y"], col, count=18, speed=260,
-                              life=0.6)
-                self.fx.ring(ev["x"], ev["y"], col, r0=8, r1=54, life=0.45)
+                big = ev.get("boss")
+                self.fx.burst(ev["x"], ev["y"], BOSS_COLOR if big else col,
+                              count=34 if big else 18,
+                              speed=330 if big else 260, life=0.6)
+                self.fx.ring(ev["x"], ev["y"], col, r0=8,
+                             r1=110 if big else 54, life=0.45)
                 self.push_feed(f"{ev['killer']}  ->  {ev['victim']}",
                                PLAYER_COLORS[ev["killer_color"]
                                              % len(PLAYER_COLORS)])
+
+            elif kind == "bosshit":
+                self.fx.burst(ev["x"], ev["y"], BOSS_COLOR, count=8, speed=170,
+                              life=0.3)
 
             elif kind == "shieldbreak":
                 self.fx.ring(ev["x"], ev["y"], POWERUP_COLOR[P_SHIELD],
@@ -429,6 +590,7 @@ class App:
             elif kind == "round":
                 self.round_result = ""
                 self.banner = f"{ev['name'].upper()}"
+                self.sub_banner = ""
                 self.push_feed(f"round {ev['round']} -- {ev['name']} "
                                f"({ev['blurb']})", TEXT_DIM)
 
@@ -439,6 +601,93 @@ class App:
 
             elif kind == "draw":
                 self.round_result = "DRAW"
+
+            elif kind == "boss":
+                # Announced during the countdown, so everybody has three
+                # seconds to work out where the boss is standing.
+                mine = ev["pid"] == self.net.my_id
+                self.sub_banner = ("YOU ARE THE BOSS" if mine
+                                   else f"BOSS: {ev['name']}")
+                self.push_feed(f"BOSS ROUND -- {ev['name']} has "
+                               f"{ev['hp']} hp, everyone else is on the same "
+                               f"side", BOSS_COLOR)
+
+            elif kind == "bossend":
+                if ev["boss_won"]:
+                    self.round_result = f"{ev['name']} SURVIVED"
+                    self.push_feed(f"the boss beat all {ev['hunters']} of them",
+                                   BOSS_COLOR)
+                else:
+                    self.round_result = "BOSS DOWN"
+                    self.push_feed("the hunters take the round", TEXT)
+
+            elif kind == "modenext":
+                who = ev.get("name") or "somebody"
+                self.push_feed(f"{who} set the next round to "
+                               f"{MODE_LABEL[ev['mode']]}", (255, 214, 92))
+
+            elif kind == "mode":
+                self.push_feed(f"mode: {MODE_LABEL[ev['mode']]}", TEXT)
+
+            elif kind == "modefail":
+                self.push_feed(f"can't switch: {ev['reason']}",
+                               (235, 130, 130))
+
+            elif kind == "notice":
+                self.push_feed(ev["text"], (235, 180, 120))
+
+            elif kind == "quake":
+                if self.net.my_id in ev.get("pids", []):
+                    self.shake.start(ev.get("secs", 3.0))
+
+            elif kind == "flagtake":
+                col = TEAM_COLORS[ev["team"] % 2]
+                self.fx.ring(ev["x"], ev["y"], col, r0=30, r1=8, life=0.4,
+                             width=3)
+                self.push_feed(f"{ev['name']} has the "
+                               f"{TEAM_NAMES[ev['team'] % 2]} flag", col)
+
+            elif kind == "flagdrop":
+                col = TEAM_COLORS[ev["team"] % 2]
+                self.fx.burst(ev["x"], ev["y"], col, count=10, speed=150,
+                              life=0.4)
+                self.push_feed(f"{TEAM_NAMES[ev['team'] % 2]} flag dropped",
+                               col)
+
+            elif kind == "flagreturn":
+                name = TEAM_NAMES[ev["team"] % 2]
+                who = ev.get("name")
+                self.push_feed(f"{name} flag returned"
+                               + (f" by {who}" if who else ""),
+                               TEAM_COLORS[ev["team"] % 2])
+
+            elif kind == "capture":
+                col = TEAM_COLORS[ev["team"] % 2]
+                self.fx.ring(ev["x"], ev["y"], col, r0=10, r1=140, life=0.7,
+                             width=4)
+                self.fx.burst(ev["x"], ev["y"], col, count=24, speed=300,
+                              life=0.7)
+                a, b = ev["score"]
+                self.push_feed(f"{ev['name']} scores -- {a} : {b}", col)
+
+            elif kind == "nocap":
+                if ev["pid"] == self.net.my_id:
+                    self.push_feed("your own flag has to be home to score",
+                                   (235, 180, 120))
+
+            elif kind == "teamend":
+                a, b = ev["score"]
+                if a == b:
+                    self.round_result = f"DRAW  {a} : {b}"
+                else:
+                    team = 0 if a > b else 1
+                    self.round_result = f"{TEAM_NAMES[team]} WINS  {a} : {b}"
+
+            elif kind == "respawn":
+                col = TEAM_COLORS[ev["team"] % 2] if ev["team"] in (0, 1) \
+                    else TEXT_DIM
+                self.fx.ring(ev["x"], ev["y"], col, r0=34, r1=6, life=0.35,
+                             width=2)
 
             elif kind == "chat":
                 self.push_chat(ev["name"], ev["color"], ev["text"])
@@ -508,7 +757,7 @@ class App:
                 row_y = y + i * 44
                 selected = i == self.sel
                 if selected:
-                    pygame.draw.rect(c, (34, 38, 52), (56, row_y - 6, 900, 40),
+                    pygame.draw.rect(c, (34, 38, 52), (56, row_y - 6, 960, 40),
                                      border_radius=4)
                 col = TEXT if selected else TEXT_DIM
                 _text(c, self.f_mid,
@@ -516,9 +765,13 @@ class App:
                 _text(c, self.f_small,
                       f"{s['host']}:{s['port']}", (470, row_y + 4), TEXT_DIM)
                 _text(c, self.f_small,
-                      f"{s['players']}/{s['max']} players", (660, row_y + 4),
+                      f"{s['players']}/{s['max']} players", (628, row_y + 4),
                       TEXT_DIM)
-                _text(c, self.f_small, f"map: {s['map']}", (800, row_y + 4),
+                mode = s.get("mode", 0)
+                _text(c, self.f_small, MODE_LABEL.get(mode, "?"),
+                      (748, row_y + 4),
+                      TEAM_COLORS[0] if mode == MODE_CTF else TEXT_DIM)
+                _text(c, self.f_small, f"map: {s['map']}", (888, row_y + 4),
                       TEXT_DIM)
 
         _text(c, self.f_mid,
@@ -550,8 +803,72 @@ class App:
         self.fx.draw(arena)
         self.draw_feed(arena)
         self.draw_overlay(arena, snap)
+        self.draw_pending_mode(arena, snap)
         self.draw_chat(arena)
+        if self.picking:
+            self.draw_picker(arena, snap)
         self.draw_hud(c, snap)
+
+    def draw_pending_mode(self, s, snap):
+        """A queued mode change, said out loud until it lands.
+
+        Top-centre of the arena: the HUD is full, the feed owns the right and
+        chat owns the bottom left, and this is a thing you want to notice
+        without going looking for it.
+        """
+        queued = snap.get("nm", snap.get("gm", 0))
+        if queued == snap.get("gm", 0):
+            return
+        text = f"next round:  {MODE_LABEL[queued].upper()}"
+        img = self.f_small.render(text, True, (255, 214, 92))
+        pad = 10
+        w, h = img.get_width() + pad * 2, img.get_height() + 8
+        x = (ARENA_W - w) // 2
+        plate = pygame.Surface((w, h), pygame.SRCALPHA)
+        plate.fill((10, 12, 18, 190))
+        s.blit(plate, (x, 8))
+        pygame.draw.rect(s, (92, 82, 46), (x, 8, w, h), 1)
+        s.blit(img, (x + pad, 12))
+
+    def draw_picker(self, s, snap):
+        """The [M] menu: pick what the next round is played as."""
+        now = snap.get("gm", 0)
+        queued = snap.get("nm", now)
+
+        w, h = 560, 108 + len(MODE_ORDER) * 62
+        x, y = (ARENA_W - w) // 2, (ARENA_H - h) // 2 - 30
+        panel = pygame.Surface((w, h), pygame.SRCALPHA)
+        panel.fill((10, 12, 18, 234))
+        s.blit(panel, (x, y))
+        pygame.draw.rect(s, (70, 78, 104), (x, y, w, h), 1)
+
+        _text(s, self.f_big, "GAME MODE", (x + 24, y + 18), TEXT)
+        _text(s, self.f_small, "takes effect next round",
+              (x + 232, y + 32), TEXT_DIM)
+
+        for i, mode in enumerate(MODE_ORDER):
+            row_y = y + 68 + i * 62
+            picked = i == self.pick_sel
+            if picked:
+                pygame.draw.rect(s, (34, 38, 52),
+                                 (x + 14, row_y - 8, w - 28, 54),
+                                 border_radius=4)
+            col = TEXT if picked else TEXT_DIM
+            _text(s, self.f_mid, f"{i + 1}   {MODE_LABEL[mode]}",
+                  (x + 26, row_y), col)
+            _text(s, self.f_small, MODE_BLURB[mode], (x + 26, row_y + 26),
+                  TEXT_DIM)
+            # Say plainly which one is running and which one is on its way.
+            if mode == queued and queued != now:
+                _text(s, self.f_small, "NEXT ROUND", (x + w - 118, row_y + 4),
+                      (255, 214, 92))
+            elif mode == now:
+                _text(s, self.f_small, "PLAYING NOW", (x + w - 118, row_y + 4),
+                      TEAM_COLORS[0])
+
+        _text(s, self.f_small,
+              "[1-3] or [Enter] choose     [M] / [Esc] close",
+              (x + 24, y + h - 30), TEXT_DIM)
 
     def draw_arena(self, s, snap):
         m = MAPS[snap["mi"] % len(MAPS)]
@@ -583,8 +900,11 @@ class App:
 
         # Ice goes under everything that moves, so it reads as ground cover
         # rather than as another thing flying around.
-        for zx, zy, zowner, zlife in snap.get("f", ()):
+        for zx, zy, zowner, zlife in snap.get("fz", ()):
             self.draw_frost(s, zx, zy, zowner, zlife)
+
+        if snap.get("gm") == MODE_CTF:
+            self.draw_ctf(s, snap)
 
         for bid, bx, by, kind in snap["l"]:
             self.draw_box(s, bx, by, kind)
@@ -679,9 +999,54 @@ class App:
             halo, core = mix(body, BG, 0.45), mix(body, (255, 255, 255), 0.7)
 
         pos = (int(bx), int(by))
+        if fl & BF_GHOST:
+            # Hollow and unfilled, so a round crossing a wall reads as passing
+            # through it rather than sitting on top of it. The owner's colour
+            # stays on the rim, which is what you need mid-fight.
+            pygame.draw.circle(s, POWERUP_COLOR[P_GHOST], pos,
+                               BULLET_RADIUS + 3 + rad, 2)
+            pygame.draw.circle(s, mix(body, BG, 0.35), pos,
+                               BULLET_RADIUS + 1 + rad, 1)
+            pygame.draw.circle(s, mix(core, BG, 0.45), pos,
+                               max(1, BULLET_RADIUS - 1 + rad))
+            return
         pygame.draw.circle(s, halo, pos, BULLET_RADIUS + 3 + rad)
         pygame.draw.circle(s, body, pos, BULLET_RADIUS + 1 + rad)
         pygame.draw.circle(s, core, pos, max(1, BULLET_RADIUS - 1 + rad))
+
+    def draw_ctf(self, s, snap):
+        """Stands and flags, drawn under everything else on the field."""
+        m = MAPS[snap["mi"] % len(MAPS)]
+        now = time.time()
+
+        for team, (bx, by) in enumerate(m["bases"]):
+            col = TEAM_COLORS[team % 2]
+            pygame.draw.circle(s, _fade(col, 0.30), (int(bx), int(by)),
+                               BASE_RADIUS)
+            pygame.draw.circle(s, col, (int(bx), int(by)), BASE_RADIUS, 2)
+            label = self.f_small.render(TEAM_NAMES[team % 2], True,
+                                        _fade(col, 0.8))
+            s.blit(label, label.get_rect(center=(int(bx),
+                                                 int(by) + BASE_RADIUS + 12)))
+
+        for team, fx, fy, carrier, state in snap.get("fl", []):
+            col = TEAM_COLORS[team % 2]
+            # A dropped flag pulses, because finding it is the whole problem.
+            if state == FLAG_DROPPED:
+                r = BASE_RADIUS * 0.6 + math.sin(now * 5) * 4
+                pygame.draw.circle(s, _fade(col, 0.55), (int(fx), int(fy)),
+                                   int(r), 2)
+            top = (fx, fy - FLAG_RADIUS - 6)
+            pygame.draw.line(s, (232, 236, 246), top,
+                             (fx, fy + FLAG_RADIUS), 2)
+            pennant = [top, (fx + 18, fy - FLAG_RADIUS + 1),
+                       (fx, fy - FLAG_RADIUS + 10)]
+            pygame.draw.polygon(s, col, pennant)
+            pygame.draw.polygon(s, (250, 250, 255), pennant, 1)
+            if state == FLAG_CARRIED:
+                pygame.draw.circle(s, col, (int(fx), int(fy)),
+                                   int(PLAYER_RADIUS + 10 + math.sin(now * 8)
+                                       * 1.5), 1)
 
     def draw_box(self, s, x, y, kind):
         col = POWERUP_COLOR.get(kind, (255, 255, 255))
@@ -735,12 +1100,36 @@ class App:
         bits = row[P_BITS]
         now = time.time()
 
+        boss = row[P_BOSS] if len(row) > P_BOSS else 0
+        team = row[P_TEAM] if len(row) > P_TEAM else -1
+        radius = BOSS_RADIUS if boss else PLAYER_RADIUS
+
+        # In a team game the side matters more than the individual, so the body
+        # takes the team colour and the player's own colour shrinks to a dot in
+        # the middle. Nobody should have to read a name to know who to shoot.
+        teamed = team in (0, 1)
+        body = TEAM_COLORS[team] if teamed else col
+
         # Your own cloak: drawn faint so you can see it is running.
         if bits & POWERUP_BIT[P_INVIS]:
             col = _fade(col, 0.34)
+            body = _fade(body, 0.34)
+
+        if boss:
+            # A slow ring of thorns, so the boss is unmistakable even in the
+            # corner of your eye while you are backing away from it.
+            spin = now * 1.2
+            for i in range(9):
+                a = spin + i * math.tau / 9
+                pygame.draw.line(
+                    s, BOSS_COLOR,
+                    (x + math.cos(a) * (radius + 2),
+                     y + math.sin(a) * (radius + 2)),
+                    (x + math.cos(a) * (radius + 9),
+                     y + math.sin(a) * (radius + 9)), 2)
 
         if bits & POWERUP_BIT[P_SHIELD]:
-            r = PLAYER_RADIUS + 7 + math.sin(now * 6) * 1.5
+            r = radius + 7 + math.sin(now * 6) * 1.5
             pygame.draw.circle(s, POWERUP_COLOR[P_SHIELD], (int(x), int(y)),
                                int(r), 2)
 
@@ -750,24 +1139,42 @@ class App:
             spin = now * 4.0
             for i in range(4):
                 a0 = spin + i * math.pi / 2
-                r = PLAYER_RADIUS + 9
+                r = radius + 9
                 pygame.draw.arc(
                     s, POWERUP_COLOR[P_REFLECT],
                     (int(x - r), int(y - r), int(r * 2), int(r * 2)),
                     a0, a0 + 0.55, 3)
 
-        barrel = POWERUP_COLOR[P_GOLDEN] if bits & POWERUP_BIT[P_GOLDEN] else col
+        barrel = (POWERUP_COLOR[P_GOLDEN] if bits & POWERUP_BIT[P_GOLDEN]
+                  else body)
         width = 7 if bits & POWERUP_BIT[P_GOLDEN] else 5
         pygame.draw.line(s, barrel, (x, y),
-                         (x + math.cos(aim) * (PLAYER_RADIUS + 12),
-                          y + math.sin(aim) * (PLAYER_RADIUS + 12)), width)
-        pygame.draw.circle(s, col, (int(x), int(y)), PLAYER_RADIUS)
+                         (x + math.cos(aim) * (radius + 12),
+                          y + math.sin(aim) * (radius + 12)), width)
+        pygame.draw.circle(s, body, (int(x), int(y)), radius)
+        if teamed:
+            pygame.draw.circle(s, col, (int(x), int(y)), max(4, radius // 3))
         pygame.draw.circle(s, (255, 255, 255) if mine else (22, 24, 32),
-                           (int(x), int(y)), PLAYER_RADIUS, 2 if mine else 1)
+                           (int(x), int(y)), radius, 2 if mine else 1)
+
+        name_y = int(y) - radius - 12
+        if boss and len(row) > P_HPMAX and row[P_HPMAX] > 1:
+            self.draw_hp_bar(s, x, name_y - 2, row[P_HP], row[P_HPMAX])
+            name_y -= 20
 
         label = self.f_small.render(info.get("name", "?"), True,
                                     TEXT if mine else TEXT_DIM)
-        s.blit(label, label.get_rect(center=(int(x), int(y) - PLAYER_RADIUS - 12)))
+        s.blit(label, label.get_rect(center=(int(x), name_y)))
+
+    def draw_hp_bar(self, s, x, y, hp, hp_max):
+        """Segmented bar over the boss -- the only health in the game."""
+        seg = max(4, min(12, int(96 / max(1, hp_max))))
+        gap = 2
+        total = hp_max * seg + (hp_max - 1) * gap
+        left = int(x - total / 2)
+        for i in range(hp_max):
+            rect = (left + i * (seg + gap), int(y) - 6, seg, 6)
+            pygame.draw.rect(s, BOSS_COLOR if i < hp else (52, 40, 44), rect)
 
     def draw_feed(self, s):
         y = 26
@@ -823,11 +1230,16 @@ class App:
             _centered(s, self.f_huge, str(n), centre, TEXT)
             _centered(s, self.f_big, self.banner,
                       (centre[0], centre[1] + 80), TEXT_DIM)
+            if self.sub_banner:
+                _centered(s, self.f_big, self.sub_banner,
+                          (centre[0], centre[1] + 124), BOSS_COLOR)
 
         elif phase == PHASE_OVER:
             col = TEXT
-            if self.round_result.endswith("WINS"):
+            if "WINS" in self.round_result or "SURVIVED" in self.round_result:
                 col = (255, 226, 150)
+            elif self.round_result == "BOSS DOWN":
+                col = BOSS_COLOR
             _centered(s, self.f_huge, self.round_result or "ROUND OVER",
                       centre, col)
             _centered(s, self.f_mid, "next map loading...",
@@ -840,21 +1252,51 @@ class App:
                       (centre[0], centre[1] + 50), TEXT_DIM)
 
         elif phase == PHASE_LIVE and me is not None:
+            ctf = snap.get("gm") == MODE_CTF
             if me[P_WAIT]:
                 _centered(s, self.f_big, "SPECTATING -- you join next round",
                           centre, TEXT_DIM)
+            elif not me[P_ALIVE] and ctf:
+                left = me[P_RESP] if len(me) > P_RESP else 0
+                _centered(s, self.f_big, "DOWN", centre, (235, 120, 130))
+                _centered(s, self.f_mid, f"back in {max(1, math.ceil(left))}s",
+                          (centre[0], centre[1] + 50), TEXT_DIM)
             elif not me[P_ALIVE]:
                 _centered(s, self.f_big, "ELIMINATED", centre, (235, 120, 130))
+            elif snap.get("bs") and me[P_BOSS]:
+                _centered(s, self.f_mid, "YOU ARE THE BOSS -- everyone else "
+                          "is hunting you", (centre[0], ARENA_H - 74),
+                          BOSS_COLOR)
+
+            elif ctf:
+                # Say it plainly, or the sudden loss of speed reads as lag.
+                mine = next((f for f in snap.get("fl", [])
+                             if f[3] == self.net.my_id), None)
+                if mine:
+                    _centered(s, self.f_mid,
+                              f"YOU HAVE THE {TEAM_NAMES[mine[0] % 2]} FLAG "
+                              f"-- heavy, get it home",
+                              (centre[0], ARENA_H - 74),
+                              TEAM_COLORS[mine[0] % 2])
 
     def draw_hud(self, c, snap):
         pygame.draw.rect(c, HUD_BG, (0, ARENA_H, WINDOW_W, HUD_H))
         pygame.draw.line(c, (40, 44, 60), (0, ARENA_H), (WINDOW_W, ARENA_H))
         top = ARENA_H + 10
         me = self.find_me()
+        ctf = snap.get("gm") == MODE_CTF
 
         # --- left block: you, your magazine, your powerups
         col = PLAYER_COLORS[self.net.my_color % len(PLAYER_COLORS)]
         _text(c, self.f_mid, self.name, (20, top), col)
+        if me is not None and me[P_BOSS]:
+            _text(c, self.f_mid, "BOSS", (20 + self.f_mid.size(self.name)[0] + 14,
+                                          top), BOSS_COLOR)
+        elif ctf and self.net.my_team in (0, 1):
+            team = self.net.my_team
+            _text(c, self.f_mid, TEAM_NAMES[team],
+                  (20 + self.f_mid.size(self.name)[0] + 14, top),
+                  TEAM_COLORS[team])
 
         if me:
             if me[P_RELOAD] > 0:
@@ -870,11 +1312,16 @@ class App:
                                  (20, top + 30, 74, 12))
                 _text(c, self.f_small, "golden round", (102, top + 28), gold)
             else:
-                for i in range(MAG_SIZE):
+                # The boss carries a much deeper magazine, so the pips get
+                # thinner rather than the row getting longer.
+                mag = BOSS_MAG if me[P_BOSS] else MAG_SIZE
+                step = 20 if mag <= 6 else max(7, int(120 / mag))
+                for i in range(mag):
                     filled = i < me[P_AMMO]
-                    rect = (20 + i * 20, top + 30, 14, 12)
+                    rect = (20 + i * step, top + 30, max(4, step - 6), 12)
                     pygame.draw.rect(c, col if filled else (44, 48, 64), rect)
-                _text(c, self.f_small, "[R] reload", (150, top + 28), TEXT_DIM)
+                _text(c, self.f_small, "[R] reload",
+                      (max(150, 28 + mag * step), top + 28), TEXT_DIM)
 
             x = 20
             for name in POWERUPS:
@@ -894,7 +1341,17 @@ class App:
         phase = snap["ph"]
         m = MAPS[snap["mi"] % len(MAPS)]
         alive = sum(1 for r in snap["p"] if r[P_ALIVE] and not r[P_WAIT])
-        if phase == PHASE_LIVE:
+        if phase == PHASE_LIVE and ctf:
+            a, b = snap.get("sc", [0, 0])
+            status = f"{TEAM_NAMES[0]} {a}  ·  {b} {TEAM_NAMES[1]}"
+            sub = f"first to {CTF_CAPTURES_TO_WIN} · {int(snap['pt'])}s left"
+        elif phase == PHASE_LIVE and snap.get("bs"):
+            boss = next((r for r in snap["p"] if r[P_ID] == snap["bs"]), None)
+            who = self.net.roster.get(snap["bs"], {}).get("name", "?")
+            hp = f" · {boss[P_HP]}/{boss[P_HPMAX]} hp" if boss else ""
+            status = f"BOSS ROUND · {who}{hp}"
+            sub = f"{alive - 1} hunters left · {int(snap['pt'])}s"
+        elif phase == PHASE_LIVE:
             status = f"ROUND {snap['rd']} · {m['name']} · {alive} alive"
             sub = f"{int(snap['pt'])}s left"
         elif phase == PHASE_COUNTDOWN:
@@ -906,21 +1363,32 @@ class App:
         else:
             status = "waiting for players"
             sub = m["name"]
+        status_col = TEXT
+        if phase == PHASE_LIVE and snap.get("bs"):
+            status_col = BOSS_COLOR
         mid_x = WINDOW_W // 2 - 90
-        _centered(c, self.f_mid, status, (mid_x, top + 12), TEXT)
+        _centered(c, self.f_mid, status, (mid_x, top + 12), status_col)
         _centered(c, self.f_small, sub, (mid_x, top + 38), TEXT_DIM)
         _centered(c, self.f_small,
-                  f"{int(self.net.ping_ms)}ms   [T] chat   [Esc] leave   "
-                  f"[F1/F2] map",
+                  f"{int(self.net.ping_ms)}ms   [T] chat   [M] mode   "
+                  f"[Esc] leave   [F1/F2] map",
                   (mid_x, top + 62), TEXT_DIM)
 
+
         # --- right block: scoreboard, best round-wins first
-        rows = sorted(snap["p"], key=lambda r: (-r[P_WINS], -r[P_KILLS]))
+        if ctf:
+            rows = sorted(snap["p"], key=lambda r: (r[P_TEAM], -r[P_KILLS]))
+        else:
+            rows = sorted(snap["p"], key=lambda r: (-r[P_WINS], -r[P_KILLS]))
         board_x = WINDOW_W - 274
         _text(c, self.f_small, "WINS  K/D", (board_x, top - 4), TEXT_DIM)
         for i, r in enumerate(rows[:8]):
             info = self.net.roster.get(r[P_ID], {})
             rc = PLAYER_COLORS[info.get("color", 0) % len(PLAYER_COLORS)]
+            if r[P_BOSS]:
+                rc = BOSS_COLOR
+            elif ctf and r[P_TEAM] in (0, 1):
+                rc = TEAM_COLORS[r[P_TEAM]]
             cx = board_x + (i // 4) * 134
             cy = top + 14 + (i % 4) * 18
             dim = not r[P_ALIVE] and phase == PHASE_LIVE

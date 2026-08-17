@@ -15,6 +15,32 @@ DISCOVERY_PORT = 50505
 DISCOVERY_MAGIC = "sacma-lan-v1"
 MAX_PLAYERS = 8
 
+# --- game modes --------------------------------------------------------------
+# The host picks the starting mode with --mode, and anybody can change it from
+# inside the game with [M]. A change always lands on the next round rather than
+# the current one, so nobody has the match pulled out from under them. The
+# current mode rides along in the beacon so the client's list can show it.
+
+MODE_FFA = 0    # last player standing, with the occasional boss round
+MODE_CTF = 1    # two teams of two, grab the flag, take it home
+MODE_BOSS = 2   # every round is a boss round
+
+MODES = {"ffa": MODE_FFA, "ctf": MODE_CTF, "boss": MODE_BOSS}
+MODE_LABEL = {
+    MODE_FFA: "free-for-all",
+    MODE_CTF: "capture the flag",
+    MODE_BOSS: "boss rush",
+}
+MODE_BLURB = {
+    MODE_FFA: "last one standing, boss round now and then",
+    MODE_CTF: "2v2, first to three captures  (four players max)",
+    MODE_BOSS: "every round has a boss, everyone else teams up",
+}
+# Order the in-game picker walks through.
+MODE_ORDER = (MODE_FFA, MODE_BOSS, MODE_CTF)
+
+MODE_CHANGE_GAP = 1.5  # seconds a client must wait between mode requests
+
 TICK_RATE = 60  # server simulation steps per second (also the snapshot rate)
 
 CHAT_MAX_LEN = 90      # characters kept from a client's message
@@ -54,6 +80,50 @@ PLAYER_RADIUS = 14
 PLAYER_SPEED = 265.0  # px/s
 RESPAWN_GRACE = 0.0
 
+# --- boss rounds (free-for-all only) -----------------------------------------
+# Every so often one player is promoted and everybody else has to gang up on
+# them. Rolled per round, so the gap between boss rounds is geometric with a
+# mean of 1/BOSS_CHANCE -- about seven rounds.
+
+BOSS_CHANCE = 1.0 / 7.0
+BOSS_MIN_PLAYERS = 3      # a boss with only one hunter is just a duel
+
+# The boss is the only thing in the game that takes more than one bullet, and
+# it scales with the size of the mob so three hunters is not a formality.
+BOSS_HP_BASE = 3
+BOSS_HP_PER_FOE = 2
+BOSS_HP_MAX = 15
+
+BOSS_RADIUS = 22          # bigger, so it is also easier to hit
+BOSS_SPEED_MULT = 1.22
+BOSS_FIRE_MULT = 0.55     # fire cooldown multiplier
+BOSS_BULLET_MULT = 1.15   # bullet speed multiplier
+BOSS_MAG = 14
+BOSS_RELOAD = 1.15
+BOSS_COLOR = (255, 96, 72)
+
+# --- capture the flag --------------------------------------------------------
+
+CTF_TEAM_SIZE = 2         # 2v2, so the server caps at four players in this mode
+CTF_CAPTURES_TO_WIN = 3
+CTF_ROUND_TIME = 180.0
+CTF_RESPAWN_TIME = 3.0    # rounds do not end on a kill here, so death is a timer
+FLAG_RADIUS = 12
+FLAG_RETURN_TIME = 12.0   # a dropped flag goes home on its own eventually
+BASE_RADIUS = 34
+# Carrying it is a serious commitment: half speed, so anyone who spots you
+# runs you down easily and the flag only travels while your team is covering
+# you. Sprint roughly cancels it out (1.45 * 0.5 = 0.73 -- still slower than a
+# free jog), which makes a loose sprint the thing to fight over on the way out.
+FLAG_CARRY_MULT = 0.5
+
+FLAG_HOME = 0
+FLAG_CARRIED = 1
+FLAG_DROPPED = 2
+
+TEAM_COLORS = [(96, 176, 255), (255, 118, 118)]
+TEAM_NAMES = ["BLUE", "RED"]
+
 # --- the one weapon ----------------------------------------------------------
 # One bullet kills, so the interesting decisions are all about ammo and angles.
 
@@ -89,9 +159,13 @@ P_HOMING = "homing"
 P_BOUNCE = "bounce"
 P_FROST = "frost"
 P_HOLD = "hold"
+P_GHOST = "ghost"
+P_QUAKE = "quake"
 
+# Order fixes the bit each one gets in a snapshot, so only ever append.
 POWERUPS = [P_SHIELD, P_AMMO, P_RAPID, P_VELOCITY, P_SWIFT, P_SCATTER,
-            P_INVIS, P_GOLDEN, P_REFLECT, P_HOMING, P_BOUNCE, P_FROST, P_HOLD]
+            P_INVIS, P_GOLDEN, P_REFLECT, P_HOMING, P_BOUNCE, P_FROST,
+            P_HOLD, P_GHOST, P_QUAKE]
 POWERUP_BIT = {name: 1 << i for i, name in enumerate(POWERUPS)}
 
 POWERUP_DURATION = {
@@ -110,6 +184,11 @@ POWERUP_DURATION = {
     P_BOUNCE: 8.0,
     P_FROST: 8.0,
     P_HOLD: 1.5,   # must match HOLD_TIME: the effect *is* the duration
+    # Short, because cover stops meaning anything while it is running -- for
+    # you and, once they work out what you picked up, for everyone aiming at
+    # the wall you are standing behind.
+    P_GHOST: 6.0,
+    P_QUAKE: 3.0,   # how long everyone else's window rattles for
 }
 
 POWERUP_LABEL = {
@@ -126,6 +205,8 @@ POWERUP_LABEL = {
     P_BOUNCE: "RICOCHET",
     P_FROST: "FROST",
     P_HOLD: "TIME STOP",
+    P_GHOST: "GHOST ROUNDS",
+    P_QUAKE: "EARTHQUAKE",
 }
 
 POWERUP_COLOR = {
@@ -142,6 +223,8 @@ POWERUP_COLOR = {
     P_BOUNCE: (255, 246, 143),
     P_FROST: (168, 246, 255),
     P_HOLD: (226, 214, 255),
+    P_GHOST: (126, 158, 255),
+    P_QUAKE: (206, 148, 96),
 }
 
 RAPID_MULT = 0.38       # fire cooldown multiplier
@@ -175,12 +258,28 @@ BOUNCE_MAX = 3          # wall hits before the round dies
 BOUNCE_DAMP = 0.94      # speed kept per bounce
 BOUNCE_LIFETIME = 2.2   # seconds; longer than a plain round so bounces land
 
+# Ghost: rounds ignore walls, blocks and rotors entirely. The arena border
+# still stops them, or half the shots on the map would sail off into nothing.
+# Ghost beats ricochet where they meet: a round that passes through a wall
+# never touches one, so there is nothing for it to bounce off.
+GHOST_SPEED_MULT = 0.85  # slower, so the shot through a wall is still a read
+
+# Earthquake: the one powerup that does nothing to the simulation. It rattles
+# every rival's actual OS window for a few seconds -- their aim wanders because
+# the window moves under the mouse, not because anything in the game changed.
+# Deliberately gentle: enough to put a shot off, not enough to be unplayable
+# or to make anybody feel ill.
+QUAKE_TIME = 3.0
+QUAKE_AMPLITUDE = 9.0   # px of window travel at the start, decaying to zero
+QUAKE_FREQ = 11.0       # rad/s of the base wobble
+
 # Bullet flags, so clients can draw special rounds differently.
 BF_GOLD = 1
 BF_HOMING = 2
 BF_PARRIED = 4
 BF_BOUNCE = 8
 BF_FROST = 16
+BF_GHOST = 32
 
 # Frost: a round leaves a patch of ice wherever it finally stops. Everyone who
 # walks through one is slowed -- except the player who fired it, so you can lay

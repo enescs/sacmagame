@@ -22,7 +22,7 @@ import time
 from .game import Game
 from .shared import (
     CHAT_MAX_LEN, CHAT_MIN_GAP, DEFAULT_PORT, DISCOVERY_MAGIC, DISCOVERY_PORT,
-    MAX_PLAYERS, TICK_RATE,
+    MODE_CHANGE_GAP, MODE_CTF, MODE_FFA, MODE_LABEL, MODES, TICK_RATE,
 )
 
 
@@ -41,6 +41,7 @@ class Conn:
         self.queue = asyncio.Queue(maxsize=120)
         self.open = True
         self.last_chat = 0.0
+        self.last_mode = 0.0
 
     def send(self, obj):
         if not self.open:
@@ -58,12 +59,14 @@ class Conn:
 
 
 class Server:
-    def __init__(self, port, name, debug=True, announce=()):
+    def __init__(self, port, name, debug=True, announce=(), mode=MODE_FFA,
+                 mode_vote=True):
         self.port = port
         self.name = name
         self.debug = debug
+        self.mode_vote = mode_vote
         self.announce = tuple(announce)
-        self.game = Game()
+        self.game = Game(mode)
         self.conns = set()
 
     # -- connection handling --------------------------------------------------
@@ -123,7 +126,9 @@ class Server:
             if conn.pid is not None:
                 return
             if self.game.free_slots() <= 0:
-                conn.send({"t": "error", "msg": "Server is full."})
+                full = ("Both teams are full -- capture the flag is 2v2."
+                        if self.game.ctf else "Server is full.")
+                conn.send({"t": "error", "msg": full})
                 conn.open = False
                 return
             name = str(msg.get("name", "player")).strip()[:14] or "player"
@@ -134,6 +139,8 @@ class Server:
                 "t": "welcome",
                 "id": player.pid,
                 "color": player.color,
+                "team": player.team,
+                "mode": self.game.mode,
                 "tick_rate": TICK_RATE,
                 "server": self.name,
             })
@@ -157,6 +164,26 @@ class Server:
             self.game.jump_map(1 if msg.get("dir", 1) >= 0 else -1)
             print(f"~~ {conn.name} switched to {self.game.map['name']}")
 
+        elif kind == "mode" and conn.pid is not None:
+            if not self.mode_vote:
+                # A notice, not an error: "error" is the fatal kind and would
+                # drop them back to the server list over a refused keypress.
+                conn.send({"t": "notice",
+                           "msg": "the host fixed the mode on this server"})
+                return
+            now = time.monotonic()
+            if now - conn.last_mode < MODE_CHANGE_GAP:
+                return  # someone leaning on the key
+            conn.last_mode = now
+            try:
+                want = int(msg.get("mode", -1))
+            except (TypeError, ValueError):
+                return
+            result = self.game.request_mode(want, conn.name)
+            if result == "ok":
+                print(f"~~ {conn.name} queued {MODE_LABEL[want]} "
+                      f"for the next round")
+
         elif kind == "ping":
             conn.send({"t": "pong", "ts": msg.get("ts")})
 
@@ -177,6 +204,11 @@ class Server:
         next_at = time.perf_counter()
         while True:
             self.game.step(dt)
+
+            if self.game.roster_dirty:
+                # A mode change reshuffled the teams.
+                self.game.roster_dirty = False
+                self._broadcast_roster()
 
             if self.game.anyone_invisible():
                 # Invisible players are filtered out server-side, so each
@@ -211,9 +243,10 @@ class Server:
                 "name": self.name,
                 "port": self.port,
                 "players": len(self.game.players),
-                "max": MAX_PLAYERS,
+                "max": self.game.max_players,
                 "map": self.game.map["name"],
                 "round": self.game.round_no,
+                "mode": self.game.mode,
             }).encode()
             # 127.0.0.1 as well, so a client on this same machine always sees
             # the game even if the OS declines to loop the broadcast back.
@@ -302,6 +335,14 @@ def main():
                          "players a broadcast cannot reach (different wifi "
                          "subnet, AP client isolation). Takes plain IPs and "
                          "whole subnets: --announce 10.166.120.0/24")
+    ap.add_argument("--mode", default="ffa", choices=sorted(MODES),
+                    help="Starting mode. ffa: last player standing, with the "
+                         "occasional boss round. boss: every round is a boss "
+                         "round. ctf: capture the flag, two teams of two. "
+                         "Players can change it in-game with [M].")
+    ap.add_argument("--no-mode-vote", action="store_true",
+                    help="Stop players changing the mode with [M]. The --mode "
+                         "you started with is then the only one.")
     ap.add_argument("--no-debug", action="store_true",
                     help="Stop clients cycling maps with [ and ]. Worth "
                          "setting once people are actually competing.")
@@ -315,15 +356,24 @@ def main():
 
     name = args.name or f"{socket.gethostname()}'s game"
     debug = not args.no_debug
+    mode = MODES[args.mode]
     try:
         announce = expand_targets(args.announce)
     except ValueError as exc:
         ap.error(str(exc))
+    mode_vote = not args.no_mode_vote
     print(f"\n== sacmagame server '{name}' on port {args.port} ==")
+    print(f"   mode: {MODE_LABEL[mode]}"
+          + ("  (2v2, four players max)" if mode == MODE_CTF else "")
+          + ("" if mode_vote else "  (fixed -- players cannot change it)"))
+    if mode_vote:
+        print("   any player can switch modes with [M]; it takes effect on "
+              "the next round")
     if debug:
         print("   debug map cycling is ON -- any player can press [ or ]")
     try:
-        asyncio.run(Server(args.port, name, debug, announce).run())
+        asyncio.run(Server(args.port, name, debug, announce, mode,
+                           mode_vote).run())
     except KeyboardInterrupt:
         print("\nserver stopped.")
 

@@ -11,6 +11,7 @@ spawn point is meaningfully better than another.
   rotors -- bars sweeping around a pivot, treated as capsules: (cx, cy,
             half_length, bar_radius, radians_per_second, phase_radians)
   spawns -- round start positions, one per player slot
+  bases  -- capture-the-flag flag stands, one per team
 """
 
 import math
@@ -23,6 +24,12 @@ CORNERS = [
     (ARENA_W // 2, 74), (ARENA_W // 2, ARENA_H - 74),
     (74, ARENA_H // 2), (ARENA_W - 74, ARENA_H // 2),
 ]
+
+# Facing each other across the long axis, so every map plays as a straight
+# left-versus-right run with the loot cluster sitting in the middle of it.
+# Rotationally symmetric like everything else, and clear of geometry on all
+# five maps -- worth re-checking against `blocked()` if you add a sixth.
+MID_BASES = ((110, ARENA_H // 2), (ARENA_W - 110, ARENA_H // 2))
 
 
 def _grid_pillars():
@@ -48,6 +55,7 @@ MAPS = [
         "movers": [],
         "rotors": [],
         "spawns": CORNERS,
+        "bases": MID_BASES,
     },
     {
         "name": "Millstone",
@@ -63,6 +71,7 @@ MAPS = [
             (880, 360, 150, 17, -1.10, 1.5708),
         ],
         "spawns": CORNERS,
+        "bases": MID_BASES,
     },
     {
         "name": "Pistons",
@@ -81,6 +90,7 @@ MAPS = [
         ],
         "rotors": [],
         "spawns": CORNERS,
+        "bases": MID_BASES,
     },
     {
         "name": "Carousel",
@@ -98,6 +108,7 @@ MAPS = [
             (940, 500, 112, 15, 1.35, 2.3562),
         ],
         "spawns": CORNERS,
+        "bases": MID_BASES,
     },
     {
         "name": "Gridlock",
@@ -106,6 +117,7 @@ MAPS = [
         "movers": [],
         "rotors": [],
         "spawns": CORNERS,
+        "bases": MID_BASES,
     },
 ]
 
