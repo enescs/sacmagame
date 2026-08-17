@@ -240,10 +240,10 @@ SCATTER_ANGLE = 0.13    # radians between scatter pellets
 # Golden gun: one shot in the magazine, slow to reload, but the round is fast
 # and goes straight through a shield. Overrides scatter -- it stays a rifle.
 GOLDEN_MAG = 1
-# Reload is half again as quick as it was (2.2s / 1.5), so the one round in the
-# magazine comes back fast enough that a miss is a setback rather than the end
-# of the powerup.
-GOLDEN_RELOAD = 1.47
+# Reload has come down twice: 2.2s -> 1.47s, then halved again. At 0.74s the
+# single round is back almost as fast as you can re-aim, so the golden gun is
+# now a fast-cycling one-shot rifle rather than a one-chance gamble.
+GOLDEN_RELOAD = 0.74
 GOLDEN_SPEED_MULT = 3.2
 
 # Reflect: a parried round is sent back the way it came, and now belongs to

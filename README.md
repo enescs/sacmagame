@@ -194,7 +194,7 @@ grabbing one usually means giving up your cover. Touch it to pick it up.
 | **Sprint** | 1.45x move speed for 10s |
 | **Scatter** | three bullets per shot for 10s |
 | **Invisible** | 3s — nobody can see you, but your bullets still show |
-| **Golden gun** | 5s — one round in the mag, 1.5s reload, very fast, ignores shields |
+| **Golden gun** | 5s — one round in the mag, 0.74s reload, very fast, ignores shields |
 | **Reflect** | 5s — parries incoming bullets straight back, and they become yours |
 | **Homing** | 5s — your bullets curve into whoever is nearest |
 | **Ricochet** | 8s — your bullets bounce off walls up to 3 times, and never hit you |
