@@ -19,11 +19,15 @@ fallback, so you can add them one at a time.
 | `bounce.png` | Ricochet |
 | `frost.png` | Frost |
 | `hold.png` | Time stop |
+| `ghost.png` | Ghost rounds |
+| `quake.png` | Earthquake |
 
 Each file also loads under the name the art was drawn with (`infammo.png`,
 `hotrounds.png`, `sprint.png`, `invisible.png`, `goldengun.png`,
-`recochet.png`, `rapidfire.png`, `timestop.png`) — see `ICON_ALIASES` in
-`client.py`.
+`recochet.png`, `rapidfire.png`, `timestop.png`, `ghostrounds.png`,
+`earthquake.png`) — see `ICON_ALIASES` in `client.py`.
+
+Every powerup in the table has art; nothing falls back to a letter any more.
 
 Drawing notes:
 
