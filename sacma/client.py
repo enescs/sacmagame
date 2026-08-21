@@ -340,6 +340,7 @@ class App:
     def connect(self, host, port):
         self.net = NetClient(host, port, self.name)
         self.net.start()
+        pygame.mouse.set_visible(False)
         self.screen_state = "play"
         self.feed.clear()
         self.chat.clear()
@@ -354,6 +355,7 @@ class App:
         if self.typing == "chat":
             self.typing = None
         self.shake.stop()
+        pygame.mouse.set_visible(True)
         self.screen_state = "menu"
 
     # -- main loop ------------------------------------------------------------
@@ -851,7 +853,32 @@ class App:
         self.draw_chat(arena)
         if self.picking:
             self.draw_picker(arena, snap)
+        self.draw_crosshair(arena)
         self.draw_hud(c, snap)
+
+    def draw_crosshair(self, s):
+        """Draw the aiming reticle where the mouse is.
+
+        The system cursor is hidden while playing: an arrow points from its
+        top-left corner, which is a few pixels off from where the round
+        actually goes, and on a scaled window it is the wrong size as well.
+        This sits exactly on the point the server aims at.
+
+        Four ticks with a gap in the middle rather than a full cross, so the
+        thing you are about to shoot is never underneath it.
+        """
+        mx, my = self.mouse_canvas()
+        if my > ARENA_H:
+            return  # over the HUD; nothing to aim at down there
+        x, y = int(mx), int(my)
+        col = PLAYER_COLORS[self.net.my_color % len(PLAYER_COLORS)]
+
+        gap, arm = 5, 11
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            pygame.draw.line(s, col,
+                             (x + dx * gap, y + dy * gap),
+                             (x + dx * arm, y + dy * arm), 2)
+        pygame.draw.circle(s, col, (x, y), 1)
 
     def draw_pending_mode(self, s, snap):
         """A queued mode change, said out loud until it lands.
