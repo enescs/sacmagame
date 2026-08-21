@@ -108,6 +108,10 @@ CTF_TEAM_SIZE = 2         # 2v2, so the server caps at four players in this mode
 CTF_CAPTURES_TO_WIN = 3
 CTF_ROUND_TIME = 180.0
 CTF_RESPAWN_TIME = 3.0    # rounds do not end on a kill here, so death is a timer
+# Long enough to get off your own stand before anyone can touch you, short
+# enough that it is no use for anything else. It ends the moment you shoot or
+# grab a flag, so it can never be carried into a fight.
+CTF_SPAWN_IMMUNITY = 2.0
 FLAG_RADIUS = 12
 FLAG_RETURN_TIME = 12.0   # a dropped flag goes home on its own eventually
 BASE_RADIUS = 34
@@ -177,7 +181,9 @@ POWERUP_DURATION = {
     # Short on purpose: a shield is a free life in a one-shot game, so it
     # should force you to go and use it rather than sit on it.
     P_SHIELD: 7.0,     # or until it eats a bullet, whichever comes first
-    P_AMMO: 10.0,
+    # Never reloading is the strongest thing a plain rifle can do, so it
+    # gets a short window rather than the ten seconds it used to run for.
+    P_AMMO: 6.0,
     P_RAPID: 10.0,
     P_VELOCITY: 12.0,
     P_SWIFT: 10.0,

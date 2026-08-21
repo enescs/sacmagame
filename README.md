@@ -170,6 +170,15 @@ teams simply running past each other; if it's away, you're standing on your
 base holding theirs until somebody sorts it out. First to three captures wins
 the round, or the higher score when the 180s runs out.
 
+**Teams are redealt every round**, so a match is not decided by who happened
+to join with whom — and never the same pairing twice running, which is what it
+feels like when the teams "did not change". The feed announces the new sides.
+
+You come back **untouchable for two seconds**, so a camped stand is not a
+firing squad. Rounds pass straight through you, which also means you cannot
+use it as a body shield for a teammate. It ends the instant you shoot or grab
+a flag, so it can never be carried into a fight.
+
 Dying is a three-second respawn at your own base, not the end of your round.
 Whoever kills the carrier makes them drop the flag exactly where they fell: run
 over your own dropped flag to send it straight home, or leave it for twelve
@@ -188,7 +197,7 @@ grabbing one usually means giving up your cover. Touch it to pick it up.
 | | |
 |---|---|
 | **Shield** | absorbs exactly one bullet, then pops — expires after 7s |
-| **Inf ammo** | no reloading for 10s |
+| **Inf ammo** | no reloading for 6s |
 | **Rapid fire** | ~2.6x fire rate for 10s |
 | **Hot rounds** | 1.7x bullet speed for 12s |
 | **Sprint** | 1.45x move speed for 10s |

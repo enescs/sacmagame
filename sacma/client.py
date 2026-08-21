@@ -40,6 +40,7 @@ P_ID, P_X, P_Y, P_AIM, P_ALIVE, P_AMMO, P_RELOAD, P_BITS = 0, 1, 2, 3, 4, 5, 6, 
 P_WINS, P_KILLS, P_DEATHS, P_WAIT, P_HID = 8, 9, 10, 11, 12
 P_TEAM, P_BOSS, P_HP, P_HPMAX, P_RESP = 13, 14, 15, 16, 17
 P_PLEFT = 18  # {powerup: fraction of its duration left}, own row only
+P_IMMUNE = 19  # seconds of capture-the-flag spawn immunity left
 
 
 POWER_PANEL_W = 200  # the live-powerup readout in the arena's top right corner
@@ -667,6 +668,10 @@ class App:
                     self.round_result = "BOSS DOWN"
                     self.push_feed("the hunters take the round", TEXT)
 
+            elif kind == "teams":
+                self.push_feed(f"teams: {' + '.join(ev['blue'])}  vs  "
+                               f"{' + '.join(ev['red'])}", TEXT)
+
             elif kind == "modenext":
                 who = ev.get("name") or "somebody"
                 self.push_feed(f"{who} set the next round to "
@@ -1198,6 +1203,16 @@ class App:
                      y + math.sin(a) * (radius + 2)),
                     (x + math.cos(a) * (radius + 9),
                      y + math.sin(a) * (radius + 9)), 2)
+
+        # Spawn immunity: a dashed ring, deliberately unlike the solid shield.
+        if len(row) > P_IMMUNE and row[P_IMMUNE]:
+            spin = now * 2.2
+            for i in range(8):
+                a0 = spin + i * math.tau / 8
+                pygame.draw.arc(s, (235, 240, 255),
+                                (int(x - radius - 6), int(y - radius - 6),
+                                 int((radius + 6) * 2), int((radius + 6) * 2)),
+                                a0, a0 + 0.30, 2)
 
         if bits & POWERUP_BIT[P_SHIELD]:
             r = radius + 7 + math.sin(now * 6) * 1.5

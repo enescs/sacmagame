@@ -34,7 +34,8 @@ from .shared import (
     BOSS_MIN_PLAYERS, BOSS_RADIUS, BOSS_RELOAD, BOSS_SPEED_MULT, BOUNCE_DAMP,
     BOUNCE_LIFETIME, BOUNCE_MAX, BOX_RADIUS, BULLET_LIFETIME, BULLET_RADIUS,
     BULLET_SPEED, BULLET_STEP, CHAT_MAX_LEN, COUNTDOWN_TIME, CTF_CAPTURES_TO_WIN,
-    CTF_RESPAWN_TIME, CTF_ROUND_TIME, CTF_TEAM_SIZE, FIRE_COOLDOWN,
+    CTF_RESPAWN_TIME, CTF_ROUND_TIME, CTF_SPAWN_IMMUNITY, CTF_TEAM_SIZE,
+    FIRE_COOLDOWN,
     FLAG_CARRIED, FLAG_CARRY_MULT, FLAG_DROPPED, FLAG_HOME, FLAG_RADIUS,
     FLAG_RETURN_TIME, FROST_MAX, FROST_RADIUS, FROST_SLOW, FROST_TIME,
     GHOST_SPEED_MULT, GOLDEN_MAG, GOLDEN_RELOAD, GOLDEN_SPEED_MULT, HOLD_TIME,
@@ -57,6 +58,7 @@ class Player:
         "pid", "name", "color", "x", "y", "aim", "alive", "waiting",
         "ammo", "reload_left", "reload_total", "cooldown", "powers", "wins",
         "kills", "deaths", "inp", "team", "boss", "hp", "hp_max", "respawn_at",
+        "immune_until",
     )
 
     def __init__(self, pid, name, color):
@@ -85,6 +87,9 @@ class Player:
         self.hp = 1
         self.hp_max = 1
         self.respawn_at = 0.0
+        # Capture the flag only: briefly untouchable after coming back, so a
+        # camped stand is not a firing squad.
+        self.immune_until = 0.0
 
     @property
     def radius(self):
@@ -290,6 +295,45 @@ class Game:
                 counts[p.team] += 1
         return 0 if counts[0] <= counts[1] else 1
 
+    def _shuffle_teams(self):
+        """Re-draw the teams for a fresh capture-the-flag round.
+
+        Sides are redealt every round so a match is not decided by who happened
+        to join with whom. Where the numbers allow it we deal again rather than
+        repeat the previous round's split, so back-to-back rounds put you with
+        somebody new -- with four players there are only three possible
+        pairings, and landing the same one twice running is what it feels like
+        when teams "did not change".
+        """
+        ids = sorted(self.players)
+        if len(ids) < 2:
+            for p in self.players.values():
+                p.team = 0 if p.team not in (0, 1) else p.team
+            return
+
+        def deal():
+            order = ids[:]
+            random.shuffle(order)
+            half = len(order) // 2
+            return frozenset(order[:half]), order
+
+        previous = frozenset(pid for pid, p in self.players.items()
+                             if p.team == 0)
+        side, order = deal()
+        for _ in range(12):
+            if side != previous and frozenset(ids) - side != previous:
+                break
+            side, order = deal()
+
+        for i, pid in enumerate(order):
+            self.players[pid].team = 0 if pid in side else 1
+        self.roster_dirty = True
+        self.events.append({
+            "kind": "teams",
+            "blue": [self.players[pid].name for pid in order if pid in side],
+            "red": [self.players[pid].name for pid in order if pid not in side],
+        })
+
     def add_player(self, name):
         used = {p.color for p in self.players.values()}
         color = next((i for i in range(MAX_PLAYERS) if i not in used), 0)
@@ -430,6 +474,7 @@ class Game:
         # Powers go first: the magazine you get depends on them, and coming
         # back with last life's golden gun would hand you a one-round rifle.
         player.powers.clear()
+        player.immune_until = 0.0
         player.ammo = self._mag_size(player)
 
     def _spawn(self, player, points):
@@ -445,6 +490,7 @@ class Game:
         a = random.uniform(0.0, math.tau)
         self._place(player, bx + math.cos(a) * 46, by + math.sin(a) * 46)
         self._reset_player(player)
+        player.immune_until = self.time + CTF_SPAWN_IMMUNITY
         player.aim = 0.0 if player.team == 0 else math.pi
 
     def _reset_roles(self):
@@ -548,9 +594,8 @@ class Game:
         self._reset_roles()
         if self.ctf:
             self._reset_flags()
+            self._shuffle_teams()
             for p in self.players.values():
-                if p.team not in (0, 1):
-                    p.team = self._pick_team()
                 self._spawn_at_base(p)
         else:
             self._maybe_pick_boss()
@@ -956,6 +1001,10 @@ class Game:
             self._begin_reload(p)
             return
 
+        # Taking a shot gives up spawn immunity. Otherwise the safest way into
+        # a fight would be to die first.
+        p.immune_until = 0.0
+
         cd = FIRE_COOLDOWN * (RAPID_MULT if p.has(P_RAPID, self.time) else 1.0)
         if p.boss:
             cd *= BOSS_FIRE_MULT
@@ -1004,6 +1053,9 @@ class Game:
             self.events.append({"kind": "shot", "pid": p.pid, "x": p.x,
                                 "y": p.y, "aim": round(p.aim, 3)})
 
+    def _immune(self, p):
+        return p.immune_until > self.time
+
     def _hostile(self, owner_pid, victim):
         """Can a round fired by `owner_pid` hurt `victim`?
 
@@ -1027,7 +1079,8 @@ class Game:
         """Curve a homing round towards the nearest valid target."""
         best, best_d2 = None, HOMING_RANGE * HOMING_RANGE
         for p in self.players.values():
-            if not p.alive or p.waiting or not self._hostile(b.owner, p):
+            if (not p.alive or p.waiting or self._immune(p)
+                    or not self._hostile(b.owner, p)):
                 continue
             d2 = (p.x - b.x) ** 2 + (p.y - b.y) ** 2
             if d2 < best_d2:
@@ -1089,7 +1142,11 @@ class Game:
             # rounds" powerup makes bullets fast enough for it to matter.
             victim = None
             for p in self.players.values():
-                if not p.alive or p.waiting or not self._hostile(b.owner, p):
+                # A freshly respawned player is not there as far as a round is
+                # concerned: rounds pass straight through rather than being
+                # eaten, so immunity cannot be used as a body shield either.
+                if (not p.alive or p.waiting or self._immune(p)
+                        or not self._hostile(b.owner, p)):
                     continue
                 if segment_hits_circle(x0, y0, b.x, b.y, p.x, p.y,
                                        p.radius + BULLET_RADIUS):
@@ -1379,6 +1436,9 @@ class Game:
                                             "team": flag.team, "pid": p.pid,
                                             "name": p.name})
                 else:
+                    # Grabbing the flag ends immunity too -- it is there to get
+                    # you off your own stand, not to walk a capture out.
+                    p.immune_until = 0.0
                     flag.carrier = p.pid
                     flag.at_home = False
                     flag.x, flag.y = p.x, p.y
@@ -1490,6 +1550,8 @@ class Game:
             # to wait out somebody else's powerup.
             {name: round(max(0.0, exp - now) / POWERUP_DURATION[name], 3)
              for name, exp in p.powers.items() if exp > now},
+            # Spawn immunity left, so the client can ring an untouchable player.
+            round(max(0.0, p.immune_until - now), 2),
         ]
 
     def snapshot(self, viewer=None):
